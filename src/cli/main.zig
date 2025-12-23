@@ -1,4 +1,6 @@
 const std = @import("std");
+const sqlite = @import("sqlite");
+
 const zigit = @import("zigit");
 
 pub fn main() !void {
