@@ -1,0 +1,12 @@
+{
+  "folders": [
+    {
+      "path": "../",
+      "name": "Zigit"
+    },
+    {
+      "path": "../modules/fangz",
+      "name": "Fangz"
+    }
+  ]
+}
