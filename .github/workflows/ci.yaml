@@ -1,1 +1,59 @@
-# TODO: Add CI for building, testing and documentation.
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+
+      - name: Install Zig
+        run: |
+          brew update
+          brew install zig
+
+      - name: Build
+        run: zig build --summary all
+
+      - name: Test
+        run: zig build --summary all tests
+
+      - name: Build docs
+        run: zig build --summary all docs
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@main
+        with:
+          path: "zig-out/docs"
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@main
