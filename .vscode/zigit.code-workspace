@@ -7,6 +7,10 @@
     {
       "path": "../modules/fangz",
       "name": "Fangz"
+    },
+    {
+      "path": "../modules/cobra",
+      "name": "Cobra"
     }
   ]
 }

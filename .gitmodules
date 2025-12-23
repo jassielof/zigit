@@ -1,3 +1,6 @@
 [submodule "modules/fangz"]
 	path = modules/fangz
 	url = https://github.com/jassielof/fangz.git
+[submodule "modules/cobra"]
+	path = modules/cobra
+	url = https://github.com/spf13/cobra.git
