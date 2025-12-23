@@ -1,3 +1,3 @@
-[submodule "modules/fangz"]
+[submodule "modules/yazap"]
 	path = modules/fangz
 	url = https://github.com/jassielof/yazap.git
