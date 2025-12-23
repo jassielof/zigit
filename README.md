@@ -1,4 +1,6 @@
-# Hola
+# Zigit
+
+Zig tool manager via git repositories.
 
 - Normal
 - **Bold**
