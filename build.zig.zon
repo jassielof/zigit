@@ -8,6 +8,9 @@
             .url = "git+https://github.com/vrischmann/zig-sqlite.git?ref=zig-0.15.1#c1a5f2720bad283f870df77b41430bd461bb9182",
             .hash = "sqlite-3.48.0-F2R_a9eODgDPCO5CDptJHZINZSIn48IFVIWUhuxxwGTb",
         },
+        .fangz = .{
+            .path = "modules/fangz",
+        },
     },
     .paths = .{
         "build.zig",

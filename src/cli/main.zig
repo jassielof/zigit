@@ -1,14 +1,29 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
+const fangz = @import("fangz");
 
-const zigit = @import("zigit");
+const commands = @import("commands/commands.zig");
+
+const App = fangz.App;
+const Arg = fangz.Arg;
+
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = gpa.allocator();
 
 pub fn main() !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
+    defer _ = gpa.deinit();
 
-    try stdout.print("Hello, World!", .{});
+    var app = App.init(allocator, "zigit", "Zig tool CLI to manage tools via Git repositories");
+    defer app.deinit();
 
-    try stdout.flush(); // Don't forget to flush!
+    var root = app.rootCommand();
+    root.setShort("Zig tool CLI to manage tools via Git repositories");
+    root.setProperty(.help_on_empty_args);
+
+    // Add subcommands
+    try commands.setupCommands(&app, root);
+
+    const matches = try app.parseProcess();
+
+    // Handle commands
+    try commands.handleCommands(&app, root, matches);
 }

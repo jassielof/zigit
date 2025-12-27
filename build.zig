@@ -6,9 +6,22 @@ pub fn build(b: *std.Build) void {
 
     const name = "zigit";
 
+    const sqlite_dep = b.dependency("sqlite", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const fangz_dep = b.dependency("fangz", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mod = b.addModule(name, .{
         .root_source_file = b.path("src/lib/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
+        },
     });
 
     const exe = b.addExecutable(.{
@@ -17,10 +30,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/cli/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{ .{ .name = "zigit", .module = mod }, .{ .name = "sqlite", .module = b.dependency("sqlite", .{
-                .target = target,
-                .optimize = optimize,
-            }).module("sqlite") } },
+            .imports = &.{ .{ .name = "zigit", .module = mod }, .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") }, .{ .name = "fangz", .module = fangz_dep.module("fangz") } },
         }),
     });
 
