@@ -1,3 +1,6 @@
 [submodule "modules/fangz"]
 	path = modules/fangz
 	url = https://github.com/jassielof/fangz.git
+[submodule "modules/sqlite"]
+	path = modules/sqlite
+	url = https://github.com/jassielof/sqlite-zig
