@@ -4,12 +4,16 @@ Zig tool CLI to manage tools via Git repositories.
 
 ## Functional requirements
 
+### Package management (dependencies)
+
+### Tooling
+
 - Must be able to install a zig package/project from a git repository.
   - It should allow for an optional alias, otherwise the package name is used, for example, suppose i install a cli named "toonz", and I already have a package named "toonz", I should be able to install it as "toonz2" or any other name to avoid conflicts.
   - The repositories should be cached locally, for faster updates, to avoid recloning every time. The location of the cache should try to follow XDG convention but with the consideration of cross platform.
   - The default installation should be like zigit install, it should default to the default branch whichever git clones it and its latest commit, and then build it. Once built, it should be either symlinked or copied to a bin folder in the users path, again, following XDG convention but cross platform.
-  - It should also allow for the user to install from a specific tag or branch, if branch without commit, it defaults to its latest commit, if the commit is specified then, it should be branch/commit, the commit alone means default branch, for example, if installing <package>, then its first cloned, then its checked out to given commit, if its a branch respectively for each case.
-  - To avoid conflicts in the cloned repositories, it should follow a cloning convetion, such as <git hosting platform>/<user>/<repo> at most
+  - It should also allow for the user to install from a specific tag or branch, if branch without commit, it defaults to its latest commit, if the commit is specified then, it should be branch/commit, the commit alone means default branch, for example, if installing `<package>`, then its first cloned, then its checked out to given commit, if its a branch respectively for each case.
+  - To avoid conflicts in the cloned repositories, it should follow a cloning convetion, such as `<git hosting platform>/<user>/<repo>` at most
 - Must be able to uninstall any of those packages.
   - The uninstallation should uninstall given packages, it should remove the binaries, symlink, and cloned repositories completely and safely.
 - Must be able to list all installed packages.
