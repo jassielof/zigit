@@ -1,124 +1,243 @@
-//! Git operations for fetching repository information
-const std = @import("std");
-const builtin = @import("builtin");
+//! Git operations using bare clone + worktree strategy.
+//!
+//! All git interaction is via `std.process.Child` shelling out to the `git`
+//! binary. No C library binding is used.
 
+const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// Repository information
-pub const RepoInfo = struct {
-    commit_hash: []const u8,
-    current_branch: ?[]const u8,
-    current_tag: ?[]const u8,
-    description: ?[]const u8,
-    author: ?[]const u8,
+pub const GitError = error{
+    GitNotFound,
+    CommandFailed,
+    ParseError,
+    OutOfMemory,
 };
 
-/// Get repository information from a local git repository
-pub fn getRepoInfo(allocator: Allocator, repo_path: []const u8) !RepoInfo {
-    // Get current commit hash
-    const commit_hash = try runGitCommand(allocator, repo_path, &.{"rev-parse", "HEAD"});
-    errdefer allocator.free(commit_hash);
+/// Parsed components of a git remote URL.
+pub const ParsedUrl = struct {
+    host: []const u8,
+    owner: []const u8,
+    repo: []const u8,
 
-    // Get current branch
-    const branch_output = runGitCommand(allocator, repo_path, &.{"rev-parse", "--abbrev-ref", "HEAD"}) catch null;
-    const current_branch = if (branch_output) |b| b else null;
+    pub fn deinit(self: *const ParsedUrl, allocator: Allocator) void {
+        allocator.free(self.host);
+        allocator.free(self.owner);
+        allocator.free(self.repo);
+    }
+};
 
-    // Get current tag (if any)
-    const tag_output = runGitCommand(allocator, repo_path, &.{"describe", "--tags", "--exact-match", "HEAD"}) catch null;
-    const current_tag = if (tag_output) |t| t else null;
+/// Parse a git URL into (host, owner, repo).
+///
+/// Handles:
+///   https://github.com/owner/repo
+///   https://github.com/owner/repo.git
+///   git@github.com:owner/repo.git
+pub fn parseUrl(allocator: Allocator, url: []const u8) !ParsedUrl {
+    var work = url;
 
-    // Try to read README.md for description
-    const description = readReadme(allocator, repo_path) catch null;
+    // Strip trailing .git
+    if (std.mem.endsWith(u8, work, ".git")) {
+        work = work[0 .. work.len - 4];
+    }
 
-    // Get author from git config
-    const author = runGitCommand(allocator, repo_path, &.{"config", "user.name"}) catch null;
+    if (std.mem.startsWith(u8, work, "git@")) {
+        // git@host:owner/repo
+        const after_at = work[4..];
+        const colon = std.mem.indexOfScalar(u8, after_at, ':') orelse return error.ParseError;
+        const host = after_at[0..colon];
+        const rest = after_at[colon + 1 ..];
+        const slash = std.mem.lastIndexOfScalar(u8, rest, '/') orelse return error.ParseError;
+        return ParsedUrl{
+            .host = try allocator.dupe(u8, host),
+            .owner = try allocator.dupe(u8, rest[0..slash]),
+            .repo = try allocator.dupe(u8, rest[slash + 1 ..]),
+        };
+    }
 
-    return RepoInfo{
-        .commit_hash = commit_hash,
-        .current_branch = current_branch,
-        .current_tag = current_tag,
-        .description = description,
-        .author = author,
+    if (std.mem.indexOf(u8, work, "://")) |proto_end| {
+        const after_proto = work[proto_end + 3 ..];
+        const first_slash = std.mem.indexOfScalar(u8, after_proto, '/') orelse return error.ParseError;
+        const host = after_proto[0..first_slash];
+        const path = after_proto[first_slash + 1 ..];
+        const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.ParseError;
+        return ParsedUrl{
+            .host = try allocator.dupe(u8, host),
+            .owner = try allocator.dupe(u8, path[0..slash]),
+            .repo = try allocator.dupe(u8, path[slash + 1 ..]),
+        };
+    }
+
+    return error.ParseError;
+}
+
+/// Run a git command and return trimmed stdout. Caller owns the returned slice.
+pub fn run(allocator: Allocator, cwd: ?[]const u8, args: []const []const u8) ![]u8 {
+    var argv = try std.ArrayList([]const u8).initCapacity(allocator, args.len + 1);
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    for (args) |arg| try argv.append(allocator, arg);
+
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv.items,
+        .cwd = cwd,
+        .max_output_bytes = 4 * 1024 * 1024,
+    }) catch return GitError.CommandFailed;
+    defer allocator.free(result.stderr);
+    defer allocator.free(result.stdout);
+
+    switch (result.term) {
+        .Exited => |code| if (code != 0) return GitError.CommandFailed,
+        else => return GitError.CommandFailed,
+    }
+
+    return allocator.dupe(u8, std.mem.trim(u8, result.stdout, " \r\n\t"));
+}
+
+/// Like `run` but also captures stderr, returned alongside stdout. Caller owns both.
+pub const RunResult = struct {
+    stdout: []u8,
+    stderr: []u8,
+    exit_code: u8,
+
+    pub fn deinit(self: *RunResult, allocator: Allocator) void {
+        allocator.free(self.stdout);
+        allocator.free(self.stderr);
+    }
+};
+
+pub fn runCapture(allocator: Allocator, cwd: ?[]const u8, args: []const []const u8) !RunResult {
+    var argv = try std.ArrayList([]const u8).initCapacity(allocator, args.len + 1);
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    for (args) |arg| try argv.append(allocator, arg);
+
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv.items,
+        .cwd = cwd,
+        .max_output_bytes = 4 * 1024 * 1024,
+    }) catch return GitError.CommandFailed;
+
+    const exit_code: u8 = switch (result.term) {
+        .Exited => |code| code,
+        else => 127,
+    };
+
+    return RunResult{
+        .stdout = result.stdout,
+        .stderr = result.stderr,
+        .exit_code = exit_code,
     };
 }
 
-/// Clone a repository to a temporary location
-pub fn cloneToTemp(allocator: Allocator, repo_url: []const u8) ![]const u8 {
-    const tmp_env = if (@import("builtin").os.tag == .windows) "TEMP" else "TMPDIR";
-    const tmp_dir_owned = std.process.getEnvVarOwned(allocator, tmp_env) catch
-        std.process.getEnvVarOwned(allocator, "TMP") catch null;
-    defer if (tmp_dir_owned) |d| allocator.free(d);
+/// Perform a bare shallow clone.
+///
+/// git clone --bare --depth 1 --single-branch [--branch <ref>] <url> <dest>
+pub fn cloneBare(allocator: Allocator, url: []const u8, dest: []const u8, ref: ?[]const u8) !void {
+    // Ensure parent directory exists
+    const parent = std.fs.path.dirname(dest) orelse ".";
+    try std.fs.cwd().makePath(parent);
 
-    const tmp_base = if (tmp_dir_owned) |d| d else (if (@import("builtin").os.tag == .windows) "C:\\Temp" else "/tmp");
+    var args = try std.ArrayList([]const u8).initCapacity(allocator, 10);
+    defer args.deinit(allocator);
 
-    // Create temporary directory
-    const temp_path = try std.fmt.allocPrint(allocator, "{s}/zigit-{d}", .{ tmp_base, std.time.timestamp() });
-    try std.fs.cwd().makePath(temp_path);
-
-    // Clone the repository
-    _ = try runGitCommand(allocator, ".", &.{ "clone", "--depth", "1", repo_url, temp_path });
-
-    return temp_path;
-}
-
-/// Run a git command and return its output
-fn runGitCommand(allocator: Allocator, cwd: []const u8, args: []const []const u8) ![]const u8 {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const arena_allocator = arena.allocator();
-
-    var argv = std.ArrayList([]const u8).initCapacity(arena_allocator, args.len + 1) catch return error.OutOfMemory;
-    try argv.append(arena_allocator, "git");
-    for (args) |arg| {
-        try argv.append(arena_allocator, arg);
+    try args.append(allocator, "clone");
+    try args.append(allocator, "--bare");
+    try args.append(allocator, "--depth");
+    try args.append(allocator, "1");
+    try args.append(allocator, "--single-branch");
+    if (ref) |r| {
+        try args.append(allocator, "--branch");
+        try args.append(allocator, r);
     }
+    try args.append(allocator, url);
+    try args.append(allocator, dest);
 
-    const result = try std.process.Child.run(.{
-        .allocator = arena_allocator,
+    var argv = try std.ArrayList([]const u8).initCapacity(allocator, args.items.len + 1);
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    for (args.items) |a| try argv.append(allocator, a);
+
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
         .argv = argv.items,
-        .cwd = cwd,
-        .max_output_bytes = 1024 * 1024, // 1MB max
-    });
+        .max_output_bytes = 1024 * 1024,
+    }) catch return GitError.CommandFailed;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| {
-            if (code != 0) {
-                return error.GitCommandFailed;
-            }
-        },
-        else => return error.GitCommandFailed,
+        .Exited => |code| if (code != 0) return GitError.CommandFailed,
+        else => return GitError.CommandFailed,
     }
-
-    // Trim whitespace and return
-    const output = std.mem.trim(u8, result.stdout, " \n\r\t");
-    return try allocator.dupe(u8, output);
 }
 
-/// Read README.md from repository
-fn readReadme(allocator: Allocator, repo_path: []const u8) !?[]const u8 {
-    const readme_paths = [_][]const u8{ "README.md", "README.txt", "README", "readme.md" };
-
-    for (readme_paths) |readme_name| {
-        const full_path = try std.fs.path.join(allocator, &.{ repo_path, readme_name });
-        defer allocator.free(full_path);
-
-        const file = std.fs.cwd().openFile(full_path, .{}) catch continue;
-        defer file.close();
-
-        // Read file using readToEndAlloc
-        const content = try file.readToEndAlloc(allocator, 1024 * 10); // 10KB max
-        defer allocator.free(content);
-
-        // Extract first paragraph or first few lines as description
-        if (std.mem.indexOf(u8, content, "\n\n")) |double_newline| {
-            return try allocator.dupe(u8, content[0..double_newline]);
-        }
-        if (std.mem.indexOf(u8, content, "\n")) |newline| {
-            return try allocator.dupe(u8, content[0..newline]);
-        }
-        return try allocator.dupe(u8, content);
-    }
-
-    return null;
+/// Fetch a ref into an existing bare repo.
+///
+/// git -C <bare_path> fetch --depth 1 origin <ref>
+pub fn fetch(allocator: Allocator, bare_path: []const u8, ref: []const u8) !void {
+    const out = try run(allocator, null, &.{ "-C", bare_path, "fetch", "--depth", "1", "origin", ref });
+    allocator.free(out);
 }
 
+/// Resolve a ref to a full SHA. Caller owns the returned string.
+pub fn revParse(allocator: Allocator, bare_path: []const u8, ref: []const u8) ![]u8 {
+    return run(allocator, null, &.{ "-C", bare_path, "rev-parse", ref });
+}
+
+/// Get the remote default branch (e.g. "main" or "master"). Caller owns result.
+pub fn defaultBranch(allocator: Allocator, bare_path: []const u8) ![]u8 {
+    // HEAD -> refs/remotes/origin/HEAD -> refs/remotes/origin/main
+    const sym = run(allocator, null, &.{ "-C", bare_path, "symbolic-ref", "refs/remotes/origin/HEAD" }) catch {
+        // Fall back to checking remote HEAD
+        return run(allocator, null, &.{ "-C", bare_path, "rev-parse", "--abbrev-ref", "origin/HEAD" });
+    };
+    defer allocator.free(sym);
+    // sym looks like "refs/remotes/origin/main"
+    const prefix = "refs/remotes/origin/";
+    if (std.mem.startsWith(u8, sym, prefix)) {
+        return allocator.dupe(u8, sym[prefix.len..]);
+    }
+    return allocator.dupe(u8, sym);
+}
+
+/// Add a worktree at `worktree_path` checked out at `commit`.
+///
+/// git -C <bare_path> worktree add <worktree_path> <commit>
+pub fn worktreeAdd(allocator: Allocator, bare_path: []const u8, worktree_path: []const u8, commit: []const u8) !void {
+    const out = try run(allocator, null, &.{ "-C", bare_path, "worktree", "add", "--detach", worktree_path, commit });
+    allocator.free(out);
+}
+
+/// Remove a worktree from the bare repo.
+///
+/// git -C <bare_path> worktree remove --force <worktree_path>
+pub fn worktreeRemove(allocator: Allocator, bare_path: []const u8, worktree_path: []const u8) void {
+    const out = run(allocator, null, &.{ "-C", bare_path, "worktree", "remove", "--force", worktree_path }) catch return;
+    allocator.free(out);
+}
+
+/// Prune stale worktree metadata from a bare repo.
+pub fn worktreePrune(allocator: Allocator, bare_path: []const u8) void {
+    const out = run(allocator, null, &.{ "-C", bare_path, "worktree", "prune" }) catch return;
+    allocator.free(out);
+}
+
+/// Check whether a bare repo directory already exists.
+pub fn bareExists(path: []const u8) bool {
+    var dir = std.fs.cwd().openDir(path, .{}) catch return false;
+    dir.close();
+    return true;
+}
+
+/// Detect the binary name from a worktree.
+/// Looks for build.zig and, if found, returns true + the exe name from the
+/// worktree directory basename.
+pub fn hasBuildZig(worktree_path: []const u8) bool {
+    var dir = std.fs.cwd().openDir(worktree_path, .{}) catch return false;
+    defer dir.close();
+    const file = dir.openFile("build.zig", .{}) catch return false;
+    file.close();
+    return true;
+}

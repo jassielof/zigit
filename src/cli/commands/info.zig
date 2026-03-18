@@ -1,283 +1,214 @@
-//! Info command - Show information about an installed or to-be-installed package
+//! `zigit info <alias|url>`
+//!
+//! Shows detailed information about an installed package (read from DB) or
+//! a not-yet-installed repository (shallow-cloned to a temp dir).
+
 const std = @import("std");
 const fangz = @import("fangz");
 const zigit = @import("zigit");
 
-const ArgMatches = fangz.ArgMatches;
-const Database = zigit.database.Database;
-const PackageRecord = zigit.database.PackageRecord;
+const Command = fangz.Command;
+const ParseContext = fangz.ParseContext;
 const paths = zigit.paths;
 const git = zigit.git;
+const database = zigit.database;
+const fugaz = @import("fugaz");
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = gpa.allocator();
+pub fn setup(parent: *Command) !void {
+    const cmd = try parent.addSubcommand(.{
+        .name = "info",
+        .description = "Show information about an installed tool or a Git repository URL",
+    });
 
-/// Package information structure
-const PackageInfo = struct {
-    name: []const u8,
-    repository_url: []const u8,
-    git_ref_type: ?[]const u8, // "tag", "branch", or null for commit
-    git_ref: ?[]const u8, // tag name, branch name, or commit hash
-    commit_hash: []const u8,
-    description: ?[]const u8,
-    author: ?[]const u8,
-    is_installed: bool,
-    is_outdated: bool,
+    try cmd.addPositional(.{
+        .name = "target",
+        .description = "Alias of an installed tool, or a Git repository URL",
+        .required = true,
+    });
 
-    pub fn deinit(self: *PackageInfo) void {
-        allocator.free(self.name);
-        allocator.free(self.repository_url);
-        if (self.git_ref_type) |r| allocator.free(r);
-        if (self.git_ref) |r| allocator.free(r);
-        allocator.free(self.commit_hash);
-        if (self.description) |d| allocator.free(d);
-        if (self.author) |a| allocator.free(a);
-    }
-};
+    cmd.hooks.run = &run;
+}
 
-/// Execute the info command
-pub fn execute(matches: ArgMatches) !void {
-    defer _ = gpa.deinit();
+fn run(ctx: *ParseContext) anyerror!void {
+    const allocator = ctx.allocator;
 
-    const package_name_or_url = matches.getSingleValue("PACKAGE") orelse {
-        std.log.err("Error: PACKAGE argument is required", .{});
+    const target = ctx.positional(0) orelse {
+        try printErr("target argument is required");
         std.process.exit(1);
     };
 
-    // Determine if it's a URL or package name
-    const is_url = std.mem.indexOf(u8, package_name_or_url, "://") != null or
-        std.mem.indexOf(u8, package_name_or_url, "git@") != null;
-
-    var info: PackageInfo = undefined;
-    errdefer info.deinit();
+    const is_url = std.mem.indexOf(u8, target, "://") != null or
+        std.mem.startsWith(u8, target, "git@");
 
     if (is_url) {
-        // It's a repository URL - fetch info from git
-        info = try getInfoFromRepository(package_name_or_url);
+        try infoFromUrl(allocator, target);
     } else {
-        // It's a package name - check if installed
-        info = try getInfoFromInstalled(package_name_or_url);
+        try infoFromInstalled(allocator, target);
     }
-
-    // Display the information
-    try displayInfo(info);
-    info.deinit();
 }
 
-/// Get package information from a repository URL (for to-be-installed packages)
-fn getInfoFromRepository(repo_url: []const u8) !PackageInfo {
-    // Check if repository is already cached
-    const cache_path = paths.getRepositoryCachePath(allocator, repo_url) catch |err| {
-        std.log.warn("Could not get cache path: {}", .{err});
-        // Fallback: clone to temp
-        return getInfoFromRepositoryTemp(repo_url);
-    };
-    defer allocator.free(cache_path);
-
-    // Check if cached repository exists
-    var cache_dir = std.fs.cwd().openDir(cache_path, .{}) catch {
-        // Not cached, clone to temp
-        return getInfoFromRepositoryTemp(repo_url);
-    };
-    defer cache_dir.close();
-
-    // Get info from cached repository
-    const repo_info = try git.getRepoInfo(allocator, cache_path);
-    defer {
-        allocator.free(repo_info.commit_hash);
-        if (repo_info.current_branch) |b| allocator.free(b);
-        if (repo_info.current_tag) |t| allocator.free(t);
-        if (repo_info.description) |d| allocator.free(d);
-        if (repo_info.author) |a| allocator.free(a);
-    }
-
-    const name = try extractPackageNameFromUrl(repo_url);
-    const git_ref_type: ?[]const u8 = if (repo_info.current_tag) |_|
-        try allocator.dupe(u8, "tag")
-    else if (repo_info.current_branch) |_|
-        try allocator.dupe(u8, "branch")
-    else null;
-    const git_ref = repo_info.current_tag orelse repo_info.current_branch;
-
-    return PackageInfo{
-        .name = name,
-        .repository_url = try allocator.dupe(u8, repo_url),
-        .git_ref_type = git_ref_type,
-        .git_ref = if (git_ref) |r| try allocator.dupe(u8, r) else null,
-        .commit_hash = try allocator.dupe(u8, repo_info.commit_hash),
-        .description = if (repo_info.description) |d| try allocator.dupe(u8, d) else null,
-        .author = if (repo_info.author) |a| try allocator.dupe(u8, a) else null,
-        .is_installed = false,
-        .is_outdated = false,
-    };
-}
-
-/// Get package information by cloning to a temporary location
-fn getInfoFromRepositoryTemp(repo_url: []const u8) !PackageInfo {
-    // Clone to temporary location
-    const temp_path = try git.cloneToTemp(allocator, repo_url);
-    defer {
-        // Clean up temp directory
-        std.fs.cwd().deleteTree(temp_path) catch {};
-        allocator.free(temp_path);
-    }
-
-    // Get info from cloned repository
-    const repo_info = try git.getRepoInfo(allocator, temp_path);
-    defer {
-        allocator.free(repo_info.commit_hash);
-        if (repo_info.current_branch) |b| allocator.free(b);
-        if (repo_info.current_tag) |t| allocator.free(t);
-        if (repo_info.description) |d| allocator.free(d);
-        if (repo_info.author) |a| allocator.free(a);
-    }
-
-    const name = try extractPackageNameFromUrl(repo_url);
-    const git_ref_type: ?[]const u8 = if (repo_info.current_tag) |_|
-        try allocator.dupe(u8, "tag")
-    else if (repo_info.current_branch) |_|
-        try allocator.dupe(u8, "branch")
-    else null;
-    const git_ref = repo_info.current_tag orelse repo_info.current_branch;
-
-    return PackageInfo{
-        .name = name,
-        .repository_url = try allocator.dupe(u8, repo_url),
-        .git_ref_type = git_ref_type,
-        .git_ref = if (git_ref) |r| try allocator.dupe(u8, r) else null,
-        .commit_hash = try allocator.dupe(u8, repo_info.commit_hash),
-        .description = if (repo_info.description) |d| try allocator.dupe(u8, d) else null,
-        .author = if (repo_info.author) |a| try allocator.dupe(u8, a) else null,
-        .is_installed = false,
-        .is_outdated = false,
-    };
-}
-
-/// Get package information from installed packages database
-fn getInfoFromInstalled(package_name: []const u8) !PackageInfo {
-    const db_path = try paths.getDatabasePath(allocator);
+fn infoFromInstalled(allocator: std.mem.Allocator, alias: []const u8) !void {
+    const db_path = try paths.dbPath(allocator);
     defer allocator.free(db_path);
 
-    var db = try Database.init(allocator, db_path);
+    var db = try database.Db.open(allocator, db_path);
     defer db.deinit();
 
-    const record = try db.getPackage(package_name);
-    if (record) |pkg| {
-        defer {
-            allocator.free(pkg.name);
-            allocator.free(pkg.repository_url);
-            if (pkg.git_ref_type) |r| allocator.free(r);
-            if (pkg.git_ref) |r| allocator.free(r);
-            allocator.free(pkg.commit_hash);
-            if (pkg.alias) |a| allocator.free(a);
-        }
-
-        // Check if outdated by comparing with remote
-        const is_outdated = checkIfOutdated(pkg.repository_url, pkg.commit_hash) catch false;
-
-        // Try to get description and author from cached repository
-        const cache_path = paths.getRepositoryCachePath(allocator, pkg.repository_url) catch null;
-        defer if (cache_path) |p| allocator.free(p);
-
-        var description: ?[]const u8 = null;
-        var author: ?[]const u8 = null;
-
-        if (cache_path) |cp| {
-            const repo_info = git.getRepoInfo(allocator, cp) catch null;
-            if (repo_info) |ri| {
-                defer {
-                    allocator.free(ri.commit_hash);
-                    if (ri.current_branch) |b| allocator.free(b);
-                    if (ri.current_tag) |t| allocator.free(t);
-                    if (ri.description) |d| allocator.free(d);
-                    if (ri.author) |a| allocator.free(a);
-                }
-                description = if (ri.description) |d| try allocator.dupe(u8, d) else null;
-                author = if (ri.author) |a| try allocator.dupe(u8, a) else null;
-            }
-        }
-
-        return PackageInfo{
-            .name = try allocator.dupe(u8, pkg.name),
-            .repository_url = try allocator.dupe(u8, pkg.repository_url),
-            .git_ref_type = if (pkg.git_ref_type) |r| try allocator.dupe(u8, r) else null,
-            .git_ref = if (pkg.git_ref) |r| try allocator.dupe(u8, r) else null,
-            .commit_hash = try allocator.dupe(u8, pkg.commit_hash),
-            .description = description,
-            .author = author,
-            .is_installed = true,
-            .is_outdated = is_outdated,
-        };
-    } else {
-        std.log.err("Package '{s}' not found in database", .{package_name});
+    const pkg = try db.getPackage(alias) orelse {
+        const msg = try std.fmt.allocPrint(allocator, "'{s}' is not installed", .{alias});
+        defer allocator.free(msg);
+        try printErr(msg);
         std.process.exit(1);
-    }
+    };
+    defer pkg.deinit(allocator);
+
+    const bare_path = try paths.bareRepoPath(allocator, pkg.host, pkg.owner, pkg.repo);
+    defer allocator.free(bare_path);
+
+    const readme = readReadme(allocator, bare_path) catch null;
+    defer if (readme) |r| allocator.free(r);
+
+    try printInfo(.{
+        .name = pkg.name,
+        .alias = pkg.alias,
+        .url = pkg.url,
+        .host = pkg.host,
+        .owner = pkg.owner,
+        .ref_type = if (pkg.tag != null) "tag" else if (pkg.branch != null) "branch" else "commit",
+        .ref = if (pkg.tag) |t| t else if (pkg.branch) |b| b else pkg.commit,
+        .commit = pkg.commit,
+        .pinned = pkg.pinned,
+        .installed = true,
+        .binary_path = pkg.binary_path,
+        .installed_at = pkg.installed_at,
+        .updated_at = pkg.updated_at,
+        .readme_excerpt = readme,
+    });
 }
 
-/// Check if a package is outdated by comparing local commit with remote
-fn checkIfOutdated(repo_url: []const u8, local_commit: []const u8) !bool {
-    // TODO: Fetch from remote and compare commits
-    // For now, return false
-    _ = repo_url;
-    _ = local_commit;
-    return false;
+fn infoFromUrl(allocator: std.mem.Allocator, url: []const u8) !void {
+    const parsed = git.parseUrl(allocator, url) catch {
+        try printErr("could not parse git URL");
+        std.process.exit(1);
+    };
+    defer parsed.deinit(allocator);
+
+    var buf: [256]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    try w.interface.print("Fetching info for {s}/{s}/{s}...\n", .{ parsed.host, parsed.owner, parsed.repo });
+    try w.interface.flush();
+
+    var tmp = try fugaz.tempDir(allocator);
+    defer tmp.deinit();
+    const tmp_path = tmp.path();
+
+    git.cloneBare(allocator, url, tmp_path, null) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "clone failed: {}", .{err});
+        defer allocator.free(msg);
+        try printErr(msg);
+        std.process.exit(1);
+    };
+
+    const commit = git.revParse(allocator, tmp_path, "HEAD") catch
+        try allocator.dupe(u8, "(unknown)");
+    defer allocator.free(commit);
+
+    const branch = git.defaultBranch(allocator, tmp_path) catch
+        try allocator.dupe(u8, "(unknown)");
+    defer allocator.free(branch);
+
+    // Checkout worktree to read README
+    var wt_tmp = try fugaz.tempDir(allocator);
+    defer wt_tmp.deinit();
+    const wt_path = wt_tmp.path();
+    wt_tmp.close() catch {};
+
+    const readme: ?[]u8 = blk: {
+        git.worktreeAdd(allocator, tmp_path, wt_path, commit) catch break :blk null;
+        defer git.worktreeRemove(allocator, tmp_path, wt_path);
+        break :blk readReadme(allocator, wt_path) catch null;
+    };
+    defer if (readme) |r| allocator.free(r);
+
+    try printInfo(.{
+        .name = parsed.repo,
+        .alias = parsed.repo,
+        .url = url,
+        .host = parsed.host,
+        .owner = parsed.owner,
+        .ref_type = "branch",
+        .ref = branch,
+        .commit = commit,
+        .pinned = false,
+        .installed = false,
+        .binary_path = null,
+        .installed_at = null,
+        .updated_at = null,
+        .readme_excerpt = readme,
+    });
 }
 
-/// Extract package name from repository URL
-fn extractPackageNameFromUrl(url: []const u8) ![]const u8 {
-    // Handle different URL formats:
-    // - https://github.com/user/repo.git
-    // - git@github.com:user/repo.git
-    // - github.com/user/repo
+const InfoDisplay = struct {
+    name: []const u8,
+    alias: []const u8,
+    url: []const u8,
+    host: []const u8,
+    owner: []const u8,
+    ref_type: []const u8,
+    ref: []const u8,
+    commit: []const u8,
+    pinned: bool,
+    installed: bool,
+    binary_path: ?[]const u8,
+    installed_at: ?[]const u8,
+    updated_at: ?[]const u8,
+    readme_excerpt: ?[]const u8,
+};
 
-    var url_copy = try allocator.dupe(u8, url);
-    errdefer allocator.free(url_copy);
+fn printInfo(info: InfoDisplay) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
 
-    // Remove .git suffix if present
-    if (std.mem.endsWith(u8, url_copy, ".git")) {
-        url_copy = url_copy[0..url_copy.len - 4];
+    try w.interface.print("Name:        {s}\n", .{info.name});
+    try w.interface.print("Alias:       {s}\n", .{info.alias});
+    try w.interface.print("URL:         {s}\n", .{info.url});
+    try w.interface.print("Host:        {s}\n", .{info.host});
+    try w.interface.print("Owner:       {s}\n", .{info.owner});
+    try w.interface.print("{s}:       {s}\n", .{ info.ref_type, info.ref });
+    try w.interface.print("Commit:      {s}\n", .{info.commit[0..@min(16, info.commit.len)]});
+    try w.interface.print("Pinned:      {s}\n", .{if (info.pinned) "yes" else "no"});
+    try w.interface.print("Installed:   {s}\n", .{if (info.installed) "yes" else "no"});
+    if (info.binary_path) |p| try w.interface.print("Binary:      {s}\n", .{p});
+    if (info.installed_at) |t| try w.interface.print("Installed:   {s}\n", .{t});
+    if (info.updated_at) |t| try w.interface.print("Updated:     {s}\n", .{t});
+    if (info.readme_excerpt) |r| {
+        try w.interface.print("\n{s}\n", .{r});
     }
-
-    // Find the last component (repo name)
-    if (std.mem.lastIndexOf(u8, url_copy, "/")) |last_slash| {
-        return try allocator.dupe(u8, url_copy[last_slash + 1..]);
-    }
-
-    if (std.mem.lastIndexOf(u8, url_copy, ":")) |last_colon| {
-        return try allocator.dupe(u8, url_copy[last_colon + 1..]);
-    }
-
-    return url_copy;
+    try w.interface.flush();
 }
 
-/// Display package information in a formatted way
-fn displayInfo(info: PackageInfo) !void {
-    var buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&buffer);
-    const stdout = &stdout_writer.interface;
+fn readReadme(allocator: std.mem.Allocator, repo_path: []const u8) ![]u8 {
+    const names = [_][]const u8{ "README.md", "README.txt", "README", "readme.md" };
+    var dir = try std.fs.cwd().openDir(repo_path, .{});
+    defer dir.close();
 
-    try stdout.print("Package: {s}\n", .{info.name});
-    try stdout.print("Repository: {s}\n", .{info.repository_url});
-
-    if (info.git_ref_type) |ref_type| {
-        try stdout.print("Git Reference: {s} ({s})\n", .{ ref_type, info.git_ref.? });
+    for (names) |name| {
+        const file = dir.openFile(name, .{}) catch continue;
+        defer file.close();
+        const content = file.readToEndAlloc(allocator, 16 * 1024) catch continue;
+        defer allocator.free(content);
+        // Return first paragraph (up to double newline)
+        const end = std.mem.indexOf(u8, content, "\n\n") orelse
+            std.mem.indexOf(u8, content, "\n") orelse
+            content.len;
+        return allocator.dupe(u8, content[0..end]);
     }
-    try stdout.print("Commit: {s}\n", .{info.commit_hash});
+    return error.NotFound;
+}
 
-    if (info.description) |desc| {
-        try stdout.print("Description: {s}\n", .{desc});
-    }
-
-    if (info.author) |author| {
-        try stdout.print("Author: {s}\n", .{author});
-    }
-
-    try stdout.print("Status: {s}", .{if (info.is_installed) "Installed" else "Not Installed"});
-
-    if (info.is_installed and info.is_outdated) {
-        try stdout.print(" (Outdated)", .{});
-    }
-    try stdout.print("\n", .{});
-
-    try stdout.flush();
+fn printErr(msg: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    var w = std.fs.File.stderr().writer(&buf);
+    try w.interface.print("error: {s}\n", .{msg});
+    try w.interface.flush();
 }
