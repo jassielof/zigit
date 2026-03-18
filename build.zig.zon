@@ -10,6 +10,15 @@
         .fangz = .{
             .path = "modules/fangz",
         },
+        .fugaz = .{
+            .path = "modules/fugaz",
+        },
+        .vereda = .{
+            .path = "modules/vereda",
+        },
+        .carnaval = .{
+            .path = "modules/carnaval",
+        },
     },
     .paths = .{
         "build.zig",
