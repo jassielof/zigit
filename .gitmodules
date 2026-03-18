@@ -4,3 +4,15 @@
 [submodule "modules/sqlite"]
 	path = modules/sqlite
 	url = https://github.com/jassielof/sqlite-zig
+[submodule "modules/cargit"]
+	path = references/cargit
+	url = https://github.com/jassielof/cargit
+[submodule "modules/carnaval"]
+	path = modules/carnaval
+	url = https://github.com/jassielof/carnaval
+[submodule "modules/fugaz"]
+	path = modules/fugaz
+	url = https://github.com/jassielof/fugaz
+[submodule "modules/vereda"]
+	path = modules/vereda
+	url = https://github.com/jassielof/vereda
