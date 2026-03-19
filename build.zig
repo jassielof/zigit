@@ -10,13 +10,13 @@ pub fn build(b: *std.Build) void {
     const sqlite_dep = b.dependency("sqlite", .{ .target = target, .optimize = optimize });
     const fangz_dep = b.dependency("fangz", .{ .target = target, .optimize = optimize });
     const fugaz_dep = b.dependency("fugaz", .{ .target = target, .optimize = optimize });
-    const vereda_dep = b.dependency("vereda", .{ .target = target, .optimize = optimize });
+    // const vereda_dep = b.dependency("vereda", .{ .target = target, .optimize = optimize });
     const carnaval_dep = b.dependency("carnaval", .{ .target = target, .optimize = optimize });
 
     const fangz_mod = fangz_dep.module("fangz");
     const sqlite_mod = sqlite_dep.module("sqlite");
     const fugaz_mod = fugaz_dep.module("fugaz");
-    const vereda_mod = vereda_dep.module("vereda");
+    // const vereda_mod = vereda_dep.module("vereda");
     const carnaval_mod = carnaval_dep.module("carnaval");
 
     const lib_mod = b.addModule(name, .{
@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "sqlite", .module = sqlite_mod },
             .{ .name = "fugaz", .module = fugaz_mod },
-            .{ .name = "vereda", .module = vereda_mod },
+            // .{ .name = "vereda", .module = vereda_mod },
             .{ .name = "carnaval", .module = carnaval_mod },
         },
     });
