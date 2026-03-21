@@ -51,6 +51,17 @@ jobs:
         with:
           cache: true
 
+      # zigit installs to ~/.local/bin (Unix) or %LOCALAPPDATA%\Programs\zigit\bin (Windows);
+      # those dirs are not always on PATH (especially on Windows runners).
+      - name: Add zigit install bin to PATH
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$LOCALAPPDATA/Programs/zigit/bin" >> "$GITHUB_PATH"
+          else
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+
       - name: Attempt to install an app
         run: zig build cli --summary all -- install https://github.com/jassielof/docent
 
