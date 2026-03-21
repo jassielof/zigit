@@ -22,7 +22,9 @@ jobs:
           submodules: recursive
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: jassielof/setup-zig@v1
+        with:
+          cache: true
 
       - name: Formatting
         run: zig fmt .
