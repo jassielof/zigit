@@ -48,8 +48,6 @@ jobs:
 
       - name: Setup Zig
         uses: jassielof/setup-zig@v1
-        with:
-          cache: true
 
       # zigit installs to ~/.local/bin (Unix) or %LOCALAPPDATA%\Programs\zigit\bin (Windows);
       # those dirs are not always on PATH (especially on Windows runners).
