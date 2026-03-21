@@ -115,6 +115,51 @@ pub fn parseUrl(allocator: Allocator, url: []const u8) !ParsedUrl {
     }
 }
 
+/// Classified install source: remote shorthand/URL vs existing directory.
+pub const InstallTarget = union(enum) {
+    remote: ParsedUrl,
+    /// Absolute filesystem path; caller frees with `allocator.free`.
+    local: []u8,
+};
+
+fn remoteInstallTargetForm(t: []const u8) bool {
+    if (std.mem.indexOf(u8, t, "://") != null) return true;
+    if (std.mem.startsWith(u8, t, "git@")) return true;
+    if (std.mem.startsWith(u8, t, "gh/")) return true;
+    return false;
+}
+
+/// Resolve `zigit install <target>`: remote URL/shorthand, or an existing directory path.
+pub fn resolveInstallTarget(allocator: Allocator, raw: []const u8) !InstallTarget {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (t.len == 0) return error.ParseError;
+
+    if (remoteInstallTargetForm(t)) {
+        return .{ .remote = try parseUrl(allocator, t) };
+    }
+
+    const abs_path = std.fs.cwd().realpathAlloc(allocator, t) catch {
+        return .{ .remote = try parseUrl(allocator, t) };
+    };
+    errdefer allocator.free(abs_path);
+
+    {
+        var dir = std.fs.openDirAbsolute(abs_path, .{}) catch {
+            allocator.free(abs_path);
+            return .{ .remote = try parseUrl(allocator, t) };
+        };
+        dir.close();
+    }
+
+    return .{ .local = abs_path };
+}
+
+/// `git rev-parse HEAD` in `repo_path`, or the placeholder `"local"` when not a git checkout.
+pub fn revParseHeadOrLocal(allocator: Allocator, repo_path: []const u8) ![]u8 {
+    return run(allocator, null, &.{ "-C", repo_path, "rev-parse", "HEAD" }) catch
+        try allocator.dupe(u8, "local");
+}
+
 /// Normalize accepted remote shorthand into canonical HTTPS URL ending in .git.
 pub fn canonicalRemoteUrl(allocator: Allocator, raw: []const u8) ![]u8 {
     const parsed = try parseUrl(allocator, raw);

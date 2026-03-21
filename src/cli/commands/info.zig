@@ -103,6 +103,39 @@ fn infoFromInstalled(allocator: std.mem.Allocator, alias: []const u8, list_branc
     };
     defer pkg.deinit(allocator);
 
+    if (std.mem.eql(u8, pkg.host, "local")) {
+        var details = gatherRepoDetailsFromBare(allocator, pkg.url, pkg.url, list_branches, list_tags) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "failed to gather repository details: {}", .{err});
+            defer allocator.free(msg);
+            try printErr(msg);
+            std.process.exit(1);
+        };
+        defer details.deinit(allocator);
+
+        try printInfo(allocator, .{
+            .name = pkg.name,
+            .url = pkg.url,
+            .host = pkg.host,
+            .owner = pkg.owner,
+            .repo = pkg.repo,
+            .default_branch = details.default_branch,
+            .head_commit = details.head_commit,
+            .latest_tag = details.latest_tag,
+            .tags = details.tags,
+            .remote_branches = details.remote_branches,
+            .local_branches = details.local_branches,
+            .manifest = details.manifest,
+            .build_script = details.build_script,
+            .installed = true,
+            .alias = pkg.alias,
+            .pinned = pkg.pinned,
+            .binary_path = pkg.binary_path,
+            .installed_at = pkg.installed_at,
+            .updated_at = pkg.updated_at,
+        });
+        return;
+    }
+
     const canonical_url = try std.fmt.allocPrint(allocator, "https://{s}/{s}/{s}.git", .{ pkg.host, pkg.owner, pkg.repo });
     defer allocator.free(canonical_url);
 

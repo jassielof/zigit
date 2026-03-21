@@ -117,6 +117,10 @@ fn updateOne(
     force: bool,
     check_only: bool,
 ) !void {
+    if (std.mem.eql(u8, pkg.host, "local")) {
+        return updateFromLocalPath(allocator, db, pkg, branch_flag, tag_flag, commit_flag, force, check_only);
+    }
+
     const bare_path = try paths.bareRepoPath(allocator, pkg.host, pkg.owner, pkg.repo);
     defer allocator.free(bare_path);
 
@@ -241,6 +245,116 @@ fn updateOne(
         .commit = new_commit,
         .branch = if (branch_flag) |b| b else pkg.branch,
         .tag = if (tag_flag) |t| t else pkg.tag,
+        .binary_path = binary_path,
+        .updated_at = now,
+    }, optimize_str, true, null);
+
+    var buf: [256]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    try w.interface.print("Updated '{s}' to {s}\n", .{ pkg.alias, new_commit[0..@min(8, new_commit.len)] });
+    try w.interface.flush();
+}
+
+fn updateFromLocalPath(
+    allocator: std.mem.Allocator,
+    db: *database.Db,
+    pkg: database.Package,
+    branch_flag: ?[]const u8,
+    tag_flag: ?[]const u8,
+    commit_flag: ?[]const u8,
+    force: bool,
+    check_only: bool,
+) !void {
+    if (branch_flag != null or tag_flag != null or commit_flag != null) {
+        try printErr("local installs only support plain updates; change refs with git in that directory");
+        return;
+    }
+
+    const work_path = pkg.url;
+
+    if (git.run(allocator, work_path, &.{ "pull", "--ff-only" })) |out| {
+        allocator.free(out);
+    } else |_| {}
+
+    const new_commit = try git.revParseHeadOrLocal(allocator, work_path);
+    defer allocator.free(new_commit);
+
+    if (!force and std.mem.eql(u8, new_commit, pkg.commit)) {
+        if (check_only) {
+            var buf: [256]u8 = undefined;
+            var w = std.fs.File.stdout().writer(&buf);
+            try w.interface.print("{s}: up to date\n", .{pkg.alias});
+            try w.interface.flush();
+        } else {
+            var buf: [256]u8 = undefined;
+            var w = std.fs.File.stdout().writer(&buf);
+            try w.interface.print("{s}: already up to date ({s})\n", .{ pkg.alias, new_commit[0..@min(8, new_commit.len)] });
+            try w.interface.flush();
+        }
+        return;
+    }
+
+    if (check_only) {
+        var buf: [256]u8 = undefined;
+        var w = std.fs.File.stdout().writer(&buf);
+        try w.interface.print("{s}: outdated ({s} -> {s})\n", .{
+            pkg.alias,
+            pkg.commit[0..@min(8, pkg.commit.len)],
+            new_commit[0..@min(8, new_commit.len)],
+        });
+        try w.interface.flush();
+        return;
+    }
+
+    {
+        var buf: [256]u8 = undefined;
+        var w = std.fs.File.stdout().writer(&buf);
+        try w.interface.print("Updating '{s}' {s} -> {s}...\n", .{
+            pkg.alias,
+            pkg.commit[0..@min(8, pkg.commit.len)],
+            new_commit[0..@min(8, new_commit.len)],
+        });
+        try w.interface.flush();
+    }
+
+    git.submoduleUpdateInit(allocator, work_path) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "git submodule update failed: {}", .{err});
+        defer allocator.free(msg);
+        try printErr(msg);
+        return;
+    };
+
+    const build_cache = try paths.buildCacheDir(allocator);
+    defer allocator.free(build_cache);
+
+    const bin_dir = try paths.binDir(allocator);
+    defer allocator.free(bin_dir);
+
+    const optimize_str = "ReleaseFast";
+    const optimize = builder.OptimizeMode.ReleaseFast;
+
+    const binary_path = builder.buildAndInstall(
+        allocator,
+        work_path,
+        pkg.alias,
+        optimize,
+        build_cache,
+        bin_dir,
+    ) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "build failed: {}", .{err});
+        defer allocator.free(msg);
+        try printErr(msg);
+        return;
+    };
+    defer allocator.free(binary_path);
+
+    const now = try database.isoNow(allocator);
+    defer allocator.free(now);
+
+    try db.updatePackage(pkg.alias, .{
+        .commit = new_commit,
+        .branch = pkg.branch,
+        .tag = pkg.tag,
         .binary_path = binary_path,
         .updated_at = now,
     }, optimize_str, true, null);
