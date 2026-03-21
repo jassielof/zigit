@@ -52,9 +52,12 @@ fn run(ctx: *ParseContext) anyerror!void {
     const list_branches = ctx.boolFlag("list-branches") orelse false;
     const list_tags = ctx.boolFlag("list-tags") orelse false;
 
+    const is_local_path = looksLikeLocalPath(target);
     const is_url = looksLikeRepoTarget(target);
 
-    if (is_url) {
+    if (is_local_path) {
+        try infoFromLocalPath(allocator, target, list_branches, list_tags);
+    } else if (is_url) {
         try infoFromUrl(allocator, target, list_branches, list_tags);
     } else {
         try infoFromInstalled(allocator, target, list_branches, list_tags);
@@ -67,6 +70,22 @@ fn looksLikeRepoTarget(target: []const u8) bool {
     if (std.mem.startsWith(u8, target, "gh/")) return true;
     if (std.mem.indexOfScalar(u8, target, '/') != null) return true;
     return false;
+}
+
+fn looksLikeLocalPath(target: []const u8) bool {
+    if (std.mem.eql(u8, target, ".") or std.mem.eql(u8, target, "..")) return true;
+    if (std.mem.startsWith(u8, target, "./") or std.mem.startsWith(u8, target, ".\\")) return true;
+    if (std.mem.startsWith(u8, target, "../") or std.mem.startsWith(u8, target, "..\\")) return true;
+    if (std.mem.startsWith(u8, target, "/") or std.mem.startsWith(u8, target, "\\")) return true;
+    if (target.len >= 3 and std.ascii.isAlphabetic(target[0]) and target[1] == ':' and (target[2] == '\\' or target[2] == '/')) return true;
+    if (std.mem.indexOfScalar(u8, target, '\\') != null) return true;
+
+    // Zig 0.15 on Windows can report `error.IsDir` for directories via statFile.
+    _ = std.fs.cwd().statFile(target) catch |err| switch (err) {
+        error.IsDir => return true,
+        else => return false,
+    };
+    return true;
 }
 
 fn infoFromInstalled(allocator: std.mem.Allocator, alias: []const u8, list_branches: bool, list_tags: bool) !void {
@@ -108,7 +127,8 @@ fn infoFromInstalled(allocator: std.mem.Allocator, alias: []const u8, list_branc
         .head_commit = details.head_commit,
         .latest_tag = details.latest_tag,
         .tags = details.tags,
-        .branches = details.branches,
+        .remote_branches = details.remote_branches,
+        .local_branches = details.local_branches,
         .manifest = details.manifest,
         .build_script = details.build_script,
         .installed = true,
@@ -173,7 +193,79 @@ fn infoFromUrl(allocator: std.mem.Allocator, target: []const u8, list_branches: 
         .head_commit = details.head_commit,
         .latest_tag = details.latest_tag,
         .tags = details.tags,
-        .branches = details.branches,
+        .remote_branches = details.remote_branches,
+        .local_branches = details.local_branches,
+        .manifest = details.manifest,
+        .build_script = details.build_script,
+        .installed = false,
+        .alias = null,
+        .pinned = null,
+        .binary_path = null,
+        .installed_at = null,
+        .updated_at = null,
+    });
+}
+
+fn infoFromLocalPath(allocator: std.mem.Allocator, target: []const u8, list_branches: bool, list_tags: bool) !void {
+    const repo_path = std.fs.cwd().realpathAlloc(allocator, target) catch {
+        try printErr("local path does not exist");
+        std.process.exit(1);
+    };
+    defer allocator.free(repo_path);
+
+    const is_git = git.run(allocator, null, &.{ "-C", repo_path, "rev-parse", "--is-inside-work-tree" }) catch null;
+    if (is_git) |out| {
+        allocator.free(out);
+    } else {
+        try printErr("local path is not a git repository");
+        std.process.exit(1);
+    }
+
+    // Local repos may have origin/upstream/etc.; refresh all configured remotes.
+    _ = git.run(allocator, null, &.{ "-C", repo_path, "fetch", "--all", "--quiet" }) catch "";
+
+    var details = gatherRepoDetailsFromBare(allocator, repo_path, repo_path, list_branches, list_tags) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "failed to gather repository details: {}", .{err});
+        defer allocator.free(msg);
+        try printErr(msg);
+        std.process.exit(1);
+    };
+    defer details.deinit(allocator);
+
+    const origin_url = git.run(allocator, null, &.{ "-C", repo_path, "config", "--get", "remote.origin.url" }) catch null;
+    defer if (origin_url) |u| allocator.free(u);
+
+    const repo_name = std.fs.path.basename(repo_path);
+    const parent = std.fs.path.dirname(repo_path) orelse "";
+    const owner_name = if (parent.len == 0) "(local)" else std.fs.path.basename(parent);
+
+    var host: []const u8 = "local";
+    var owner: []const u8 = owner_name;
+    var repo: []const u8 = repo_name;
+
+    var parsed_origin: ?git.ParsedUrl = null;
+    defer if (parsed_origin) |p| p.deinit(allocator);
+    if (origin_url) |u| {
+        parsed_origin = git.parseUrl(allocator, u) catch null;
+        if (parsed_origin) |p| {
+            host = p.host;
+            owner = p.owner;
+            repo = p.repo;
+        }
+    }
+
+    try printInfo(allocator, .{
+        .name = repo,
+        .url = origin_url orelse repo_path,
+        .host = host,
+        .owner = owner,
+        .repo = repo,
+        .default_branch = details.default_branch,
+        .head_commit = details.head_commit,
+        .latest_tag = details.latest_tag,
+        .tags = details.tags,
+        .remote_branches = details.remote_branches,
+        .local_branches = details.local_branches,
         .manifest = details.manifest,
         .build_script = details.build_script,
         .installed = false,
@@ -295,7 +387,8 @@ const RepoDetails = struct {
     head_commit: []u8,
     latest_tag: ?[]u8,
     tags: []RefEntry,
-    branches: []RefEntry,
+    remote_branches: []RefEntry,
+    local_branches: []RefEntry,
     manifest: ManifestInfo,
     build_script: BuildScriptInfo,
 
@@ -305,8 +398,10 @@ const RepoDetails = struct {
         if (self.latest_tag) |t| allocator.free(t);
         for (self.tags) |*tag| tag.deinit(allocator);
         allocator.free(self.tags);
-        for (self.branches) |*br| br.deinit(allocator);
-        allocator.free(self.branches);
+        for (self.remote_branches) |*br| br.deinit(allocator);
+        allocator.free(self.remote_branches);
+        for (self.local_branches) |*br| br.deinit(allocator);
+        allocator.free(self.local_branches);
         self.manifest.deinit(allocator);
         self.build_script.deinit(allocator);
     }
@@ -322,7 +417,8 @@ const InfoDisplay = struct {
     head_commit: []const u8,
     latest_tag: ?[]const u8,
     tags: []const RefEntry,
-    branches: []const RefEntry,
+    remote_branches: []const RefEntry,
+    local_branches: []const RefEntry,
     manifest: ManifestInfo,
     build_script: BuildScriptInfo,
     installed: bool,
@@ -342,10 +438,11 @@ fn gatherRepoDetailsFromBare(allocator: std.mem.Allocator, bare_path: []const u8
     var default_branch = git.defaultBranch(allocator, bare_path) catch try allocator.dupe(u8, "(unknown)");
 
     const tags = try gatherRefs(allocator, bare_path, .tags, list_tags);
-    const branches = try gatherRefs(allocator, bare_path, .branches, list_branches);
-    if (std.mem.eql(u8, default_branch, "(unknown)") and branches.len > 0) {
+    const remote_branches = try gatherRefs(allocator, bare_path, .branches, list_branches);
+    const local_branches = try gatherRefs(allocator, bare_path, .local_branches, list_branches);
+    if (std.mem.eql(u8, default_branch, "(unknown)") and remote_branches.len > 0) {
         allocator.free(default_branch);
-        default_branch = try allocator.dupe(u8, branches[0].name);
+        default_branch = try allocator.dupe(u8, remote_branches[0].name);
     }
 
     const branch_ref = if (std.mem.eql(u8, default_branch, "(unknown)"))
@@ -377,7 +474,8 @@ fn gatherRepoDetailsFromBare(allocator: std.mem.Allocator, bare_path: []const u8
         .head_commit = head_commit,
         .latest_tag = latest_tag,
         .tags = tags,
-        .branches = branches,
+        .remote_branches = remote_branches,
+        .local_branches = local_branches,
         .manifest = manifest,
         .build_script = build_script,
     };
@@ -1073,13 +1171,21 @@ fn printInfo(allocator: std.mem.Allocator, info: InfoDisplay) !void {
     }
 
     try printHeaderStyled(allocator, &w, "Git References");
-    if (info.branches.len > 0) {
-        try w.interface.print("Branches ({d}):\n", .{info.branches.len});
-        for (info.branches) |br| {
+    if (info.remote_branches.len > 0) {
+        try w.interface.print("Remote branches ({d}):\n", .{info.remote_branches.len});
+        for (info.remote_branches) |br| {
             try w.interface.print("  * {s} {s}\n", .{ br.name, br.commit[0..@min(12, br.commit.len)] });
         }
     } else {
-        try w.interface.print("Branches: (none found)\n", .{});
+        try w.interface.print("Remote branches: (none found)\n", .{});
+    }
+    if (info.local_branches.len > 0) {
+        try w.interface.print("Local branches ({d}):\n", .{info.local_branches.len});
+        for (info.local_branches) |br| {
+            try w.interface.print("  * {s} {s}\n", .{ br.name, br.commit[0..@min(12, br.commit.len)] });
+        }
+    } else {
+        try w.interface.print("Local branches: (none found)\n", .{});
     }
     if (info.tags.len > 0) {
         try w.interface.print("Tags ({d}):\n", .{info.tags.len});

@@ -15,6 +15,7 @@ pub const GitError = error{
 
 pub const RefKind = enum {
     branches,
+    local_branches,
     tags,
 };
 
@@ -258,7 +259,8 @@ pub fn defaultBranch(allocator: Allocator, bare_path: []const u8) ![]u8 {
 pub fn listRemoteRefs(allocator: Allocator, bare_path: []const u8, kind: RefKind) ![]RefInfo {
     const format = "%(refname:short)|%(objectname)";
     const pattern = switch (kind) {
-        .branches => "refs/remotes/origin",
+        .branches => "refs/remotes",
+        .local_branches => "refs/heads",
         .tags => "refs/tags",
     };
 
@@ -274,15 +276,15 @@ pub fn listRemoteRefs(allocator: Allocator, bare_path: []const u8, kind: RefKind
         if (line.len == 0) continue;
 
         const sep = std.mem.indexOfScalar(u8, line, '|') orelse continue;
-        var ref_name = line[0..sep];
+        const ref_name = line[0..sep];
         const commit = std.mem.trim(u8, line[sep + 1 ..], " \r\t");
         if (commit.len == 0) continue;
 
-        if (kind == .branches and std.mem.startsWith(u8, ref_name, "origin/")) {
-            ref_name = ref_name["origin/".len..];
-        }
-        if (kind == .branches and std.mem.eql(u8, ref_name, "HEAD")) {
-            continue;
+        if (kind == .branches) {
+            // Keep remote-qualified names explicit (e.g. origin/main, upstream/main).
+            // Skip synthetic refs such as origin/HEAD and namespace-only refs like origin.
+            if (std.mem.endsWith(u8, ref_name, "/HEAD")) continue;
+            if (std.mem.indexOfScalar(u8, ref_name, '/') == null) continue;
         }
 
         try list.append(allocator, .{
