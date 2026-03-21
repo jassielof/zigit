@@ -216,24 +216,37 @@ const ManifestDependency = struct {
     }
 };
 
+const SubmoduleInfo = struct {
+    path: []u8,
+    url: ?[]u8,
+
+    fn deinit(self: *SubmoduleInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        if (self.url) |u| allocator.free(u);
+    }
+};
+
 const ManifestInfo = struct {
     present: bool,
     name: ?[]u8,
     version: ?[]u8,
     minimum_zig_version: ?[]u8,
+    local_zig_version: ?[]u8,
+    install_compatible: ?bool,
     dependencies: []ManifestDependency,
     paths: [][]u8,
-    submodules: [][]u8,
+    submodules: []SubmoduleInfo,
 
     fn deinit(self: *ManifestInfo, allocator: std.mem.Allocator) void {
         if (self.name) |s| allocator.free(s);
         if (self.version) |s| allocator.free(s);
         if (self.minimum_zig_version) |s| allocator.free(s);
+        if (self.local_zig_version) |s| allocator.free(s);
         for (self.dependencies) |*d| d.deinit(allocator);
         allocator.free(self.dependencies);
         for (self.paths) |p| allocator.free(p);
         allocator.free(self.paths);
-        for (self.submodules) |s| allocator.free(s);
+        for (self.submodules) |*s| s.deinit(allocator);
         allocator.free(self.submodules);
     }
 };
@@ -249,17 +262,16 @@ const BuildImport = struct {
 const BuildUnit = struct {
     kind: []const u8,
     variable: []u8,
-    name_expr: ?[]u8,
+    name: ?[]u8,
     root_source_file: ?[]u8,
     target_expr: ?[]u8,
     optimize_expr: ?[]u8,
     imports: []BuildImport,
     installed: bool,
-    has_run_step: bool,
 
     fn deinit(self: *BuildUnit, allocator: std.mem.Allocator) void {
         allocator.free(self.variable);
-        if (self.name_expr) |s| allocator.free(s);
+        if (self.name) |s| allocator.free(s);
         if (self.root_source_file) |s| allocator.free(s);
         if (self.target_expr) |s| allocator.free(s);
         if (self.optimize_expr) |s| allocator.free(s);
@@ -398,16 +410,20 @@ fn inspectManifestFromSource(allocator: std.mem.Allocator, manifest_src: ?[]cons
             .name = null,
             .version = null,
             .minimum_zig_version = null,
+            .local_zig_version = null,
+            .install_compatible = null,
             .dependencies = &.{},
             .paths = &.{},
             .submodules = &.{},
         };
     };
-    const submodules = try parseGitmodulesPathsFromSource(allocator, gitmodules_src);
+    const submodules = try parseGitmodulesFromSource(allocator, gitmodules_src);
 
     const name = try parseValueTokenAfterField(allocator, src, ".name");
     const version = try parseQuotedStringAfterField(allocator, src, ".version");
     const minimum_zig_version = try parseQuotedStringAfterField(allocator, src, ".minimum_zig_version");
+    const local_zig_version = try readLocalZigVersion(allocator);
+    const install_compatible = isInstallCompatible(local_zig_version, minimum_zig_version);
     const dependencies = try parseManifestDependencies(allocator, src, submodules);
     const manifest_paths = try parseStringListAfterField(allocator, src, ".paths");
 
@@ -416,6 +432,8 @@ fn inspectManifestFromSource(allocator: std.mem.Allocator, manifest_src: ?[]cons
         .name = name,
         .version = version,
         .minimum_zig_version = minimum_zig_version,
+        .local_zig_version = local_zig_version,
+        .install_compatible = install_compatible,
         .dependencies = dependencies,
         .paths = manifest_paths,
         .submodules = submodules,
@@ -430,7 +448,10 @@ fn inspectBuildScriptFromSource(allocator: std.mem.Allocator, build_src: ?[]cons
     var units = std.ArrayList(BuildUnit).empty;
     defer units.deinit(allocator);
 
-    inline for (.{ "addExecutable", "addLibrary", "addTest" }) |kind_name| {
+    const const_bindings = try parseConstStringBindings(allocator, src);
+    defer freeConstStringBindings(allocator, const_bindings);
+
+    inline for (.{"addExecutable"}) |kind_name| {
         var search_from: usize = 0;
         const needle = "b." ++ kind_name ++ "(.{";
         while (std.mem.indexOfPos(u8, src, search_from, needle)) |idx| {
@@ -442,7 +463,8 @@ fn inspectBuildScriptFromSource(allocator: std.mem.Allocator, build_src: ?[]cons
 
             const var_name = parseAssignedConstName(allocator, src, idx) catch try allocator.dupe(u8, "(anonymous)");
             const obj_text = src[obj_span.start .. obj_span.end + 1];
-            const name_expr = try parseValueTokenAfterField(allocator, obj_text, ".name");
+            const name_token = try parseValueTokenAfterField(allocator, obj_text, ".name");
+            const resolved_name = try resolveNameToken(allocator, name_token, const_bindings);
             const root_module_expr = extractFieldValueToken(obj_text, ".root_module");
 
             var root_source_file: ?[]u8 = null;
@@ -465,18 +487,16 @@ fn inspectBuildScriptFromSource(allocator: std.mem.Allocator, build_src: ?[]cons
             }
 
             const installed = isArtifactInstalled(src, var_name);
-            const has_run_step = hasRunArtifact(src, var_name);
 
             try units.append(allocator, .{
                 .kind = kind_name,
                 .variable = var_name,
-                .name_expr = name_expr,
+                .name = resolved_name,
                 .root_source_file = root_source_file,
                 .target_expr = target_expr,
                 .optimize_expr = optimize_expr,
                 .imports = try imports.toOwnedSlice(allocator),
                 .installed = installed,
-                .has_run_step = has_run_step,
             });
 
             search_from = obj_span.end + 1;
@@ -511,7 +531,7 @@ fn parseBuildImports(allocator: std.mem.Allocator, module_obj: []const u8) !std.
     return list;
 }
 
-fn parseManifestDependencies(allocator: std.mem.Allocator, src: []const u8, submodules: [][]u8) ![]ManifestDependency {
+fn parseManifestDependencies(allocator: std.mem.Allocator, src: []const u8, submodules: []SubmoduleInfo) ![]ManifestDependency {
     const deps_val = extractFieldValueToken(src, ".dependencies") orelse return &.{};
     const dot_obj_start = std.mem.indexOf(u8, deps_val, ".{") orelse return &.{};
     const brace_start = dot_obj_start + 1;
@@ -541,14 +561,17 @@ fn parseManifestDependencies(allocator: std.mem.Allocator, src: []const u8, subm
         const dep_obj = deps_obj[rhs_span.start .. rhs_span.end + 1];
 
         const dep_path = try parseQuotedStringAfterField(allocator, dep_obj, ".path");
-        const dep_url = try parseQuotedStringAfterField(allocator, dep_obj, ".url");
+        var dep_url = try parseQuotedStringAfterField(allocator, dep_obj, ".url");
         const dep_name = try allocator.dupe(u8, deps_obj[key_start..key_end]);
 
         var is_submodule_path = false;
         if (dep_path) |p| {
             for (submodules) |sm| {
-                if (std.mem.eql(u8, p, sm)) {
+                if (std.mem.eql(u8, p, sm.path)) {
                     is_submodule_path = true;
+                    if (dep_url == null and sm.url != null) {
+                        dep_url = try allocator.dupe(u8, sm.url.?);
+                    }
                     break;
                 }
             }
@@ -567,21 +590,58 @@ fn parseManifestDependencies(allocator: std.mem.Allocator, src: []const u8, subm
     return list.toOwnedSlice(allocator);
 }
 
-fn parseGitmodulesPathsFromSource(allocator: std.mem.Allocator, gitmodules_src: ?[]const u8) ![][]u8 {
+fn parseGitmodulesFromSource(allocator: std.mem.Allocator, gitmodules_src: ?[]const u8) ![]SubmoduleInfo {
     const src = gitmodules_src orelse return &.{};
 
-    var list = std.ArrayList([]u8).empty;
+    var list = std.ArrayList(SubmoduleInfo).empty;
     defer list.deinit(allocator);
+
+    var current_path: ?[]u8 = null;
+    var current_url: ?[]u8 = null;
+
+    const pushCurrent = struct {
+        fn call(alloc: std.mem.Allocator, dest: *std.ArrayList(SubmoduleInfo), path: *?[]u8, url: *?[]u8) !void {
+            if (path.*) |p| {
+                try dest.append(alloc, .{ .path = p, .url = url.* });
+                path.* = null;
+                url.* = null;
+            } else if (url.*) |u| {
+                alloc.free(u);
+                url.* = null;
+            }
+        }
+    }.call;
 
     var lines = std.mem.splitScalar(u8, src, '\n');
     while (lines.next()) |line_raw| {
         const line = std.mem.trim(u8, line_raw, " \r\t");
-        if (!std.mem.startsWith(u8, line, "path")) continue;
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const value = std.mem.trim(u8, line[eq + 1 ..], " \r\t");
-        if (value.len == 0) continue;
-        try list.append(allocator, try allocator.dupe(u8, value));
+        if (line.len == 0) continue;
+
+        if (std.mem.startsWith(u8, line, "[submodule ")) {
+            try pushCurrent(allocator, &list, &current_path, &current_url);
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, line, "path")) {
+            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            const value = std.mem.trim(u8, line[eq + 1 ..], " \r\t");
+            if (value.len == 0) continue;
+            if (current_path) |p| allocator.free(p);
+            current_path = try allocator.dupe(u8, value);
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, line, "url")) {
+            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            const value = std.mem.trim(u8, line[eq + 1 ..], " \r\t");
+            if (value.len == 0) continue;
+            if (current_url) |u| allocator.free(u);
+            current_url = try allocator.dupe(u8, value);
+            continue;
+        }
     }
+
+    try pushCurrent(allocator, &list, &current_path, &current_url);
 
     return list.toOwnedSlice(allocator);
 }
@@ -745,12 +805,6 @@ fn isArtifactInstalled(src: []const u8, artifact_var: []const u8) bool {
     return std.mem.indexOf(u8, src, needle) != null;
 }
 
-fn hasRunArtifact(src: []const u8, artifact_var: []const u8) bool {
-    var buf: [128]u8 = undefined;
-    const needle = std.fmt.bufPrint(&buf, "b.addRunArtifact({s})", .{artifact_var}) catch return false;
-    return std.mem.indexOf(u8, src, needle) != null;
-}
-
 fn readGitFileAtCommit(allocator: std.mem.Allocator, bare_path: []const u8, commit: []const u8, rel_path: []const u8) !?[]u8 {
     const object = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ commit, rel_path });
     defer allocator.free(object);
@@ -760,6 +814,138 @@ fn readGitFileAtCommit(allocator: std.mem.Allocator, bare_path: []const u8, comm
 
     if (result.exit_code != 0) return null;
     return try allocator.dupe(u8, std.mem.trimRight(u8, result.stdout, "\r\n"));
+}
+
+const ConstStringBinding = struct {
+    name: []u8,
+    value: []u8,
+};
+
+fn parseConstStringBindings(allocator: std.mem.Allocator, src: []const u8) ![]ConstStringBinding {
+    var list = std.ArrayList(ConstStringBinding).empty;
+    defer list.deinit(allocator);
+
+    var search_from: usize = 0;
+    while (std.mem.indexOfPos(u8, src, search_from, "const ")) |idx| {
+        const after_const = idx + "const ".len;
+        var name_end = after_const;
+        while (name_end < src.len and isIdentChar(src[name_end])) : (name_end += 1) {}
+        if (name_end == after_const) {
+            search_from = after_const;
+            continue;
+        }
+
+        const eq = std.mem.indexOfScalarPos(u8, src, name_end, '=') orelse {
+            search_from = name_end;
+            continue;
+        };
+        var i = eq + 1;
+        while (i < src.len and isSpace(src[i])) : (i += 1) {}
+        if (i >= src.len or src[i] != '"') {
+            search_from = i;
+            continue;
+        }
+
+        const end = findStringEnd(src, i + 1) orelse {
+            search_from = i + 1;
+            continue;
+        };
+        try list.append(allocator, .{
+            .name = try allocator.dupe(u8, src[after_const..name_end]),
+            .value = try allocator.dupe(u8, src[i + 1 .. end]),
+        });
+        search_from = end + 1;
+    }
+
+    return list.toOwnedSlice(allocator);
+}
+
+fn freeConstStringBindings(allocator: std.mem.Allocator, bindings: []ConstStringBinding) void {
+    for (bindings) |b| {
+        allocator.free(b.name);
+        allocator.free(b.value);
+    }
+    allocator.free(bindings);
+}
+
+fn resolveNameToken(allocator: std.mem.Allocator, token_opt: ?[]u8, bindings: []const ConstStringBinding) !?[]u8 {
+    const token = token_opt orelse return null;
+    defer allocator.free(token);
+
+    if (token.len >= 2 and token[0] == '"') {
+        const end = findStringEnd(token, 1) orelse token.len - 1;
+        return try allocator.dupe(u8, token[1..end]);
+    }
+
+    for (bindings) |b| {
+        if (std.mem.eql(u8, token, b.name)) {
+            return try allocator.dupe(u8, b.value);
+        }
+    }
+
+    return try allocator.dupe(u8, token);
+}
+
+fn readLocalZigVersion(allocator: std.mem.Allocator) !?[]u8 {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "zig", "version" },
+        .max_output_bytes = 1024,
+    }) catch return null;
+    defer allocator.free(result.stderr);
+    defer allocator.free(result.stdout);
+
+    const exit_code_ok = switch (result.term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+    if (!exit_code_ok) return null;
+
+    const line_end = std.mem.indexOfScalar(u8, result.stdout, '\n') orelse result.stdout.len;
+    const line = std.mem.trim(u8, result.stdout[0..line_end], " \r\t");
+    if (line.len == 0) return null;
+    return try allocator.dupe(u8, line);
+}
+
+fn isInstallCompatible(local_opt: ?[]const u8, min_opt: ?[]const u8) ?bool {
+    const local = local_opt orelse return null;
+    const min = min_opt orelse return null;
+
+    const local_v = parseSemverLoose(local) orelse return null;
+    const min_v = parseSemverLoose(min) orelse return null;
+
+    return compareSemver(local_v, min_v) != .lt;
+}
+
+const SemverLoose = struct {
+    major: u64,
+    minor: u64,
+    patch: u64,
+};
+
+fn parseSemverLoose(text: []const u8) ?SemverLoose {
+    const trimmed = std.mem.trim(u8, text, " \r\t");
+    if (trimmed.len == 0) return null;
+
+    const cutoff = std.mem.indexOfAny(u8, trimmed, "-+") orelse trimmed.len;
+    const core = trimmed[0..cutoff];
+
+    var it = std.mem.splitScalar(u8, core, '.');
+    const ma = it.next() orelse return null;
+    const mi = it.next() orelse return null;
+    const pa = it.next() orelse "0";
+
+    return .{
+        .major = std.fmt.parseInt(u64, ma, 10) catch return null,
+        .minor = std.fmt.parseInt(u64, mi, 10) catch return null,
+        .patch = std.fmt.parseInt(u64, pa, 10) catch return null,
+    };
+}
+
+fn compareSemver(a: SemverLoose, b: SemverLoose) std.math.Order {
+    if (a.major != b.major) return std.math.order(a.major, b.major);
+    if (a.minor != b.minor) return std.math.order(a.minor, b.minor);
+    return std.math.order(a.patch, b.patch);
 }
 
 fn isSpace(c: u8) bool {
@@ -812,6 +998,15 @@ fn printInfo(allocator: std.mem.Allocator, info: InfoDisplay) !void {
         try w.interface.print("Name:            {s}\n", .{info.manifest.name orelse "(unknown)"});
         try w.interface.print("Version:         {s}\n", .{info.manifest.version orelse "(unknown)"});
         try w.interface.print("Min Zig:         {s}\n", .{info.manifest.minimum_zig_version orelse "(unknown)"});
+        try w.interface.print("Local Zig:       {s}\n", .{info.manifest.local_zig_version orelse "(unknown)"});
+        if (info.manifest.install_compatible) |ok| {
+            try w.interface.print("Compatible:      {s}\n", .{if (ok) "yes" else "no"});
+            if (!ok and info.manifest.minimum_zig_version != null and info.manifest.local_zig_version != null) {
+                try w.interface.print("Compatibility:   requires Zig >= {s}, current is {s}\n", .{ info.manifest.minimum_zig_version.?, info.manifest.local_zig_version.? });
+            }
+        } else {
+            try w.interface.print("Compatible:      unknown\n", .{});
+        }
         try w.interface.print("Dependencies:    {d}\n", .{info.manifest.dependencies.len});
         for (info.manifest.dependencies) |dep| {
             const path = dep.path orelse "(none)";
@@ -834,7 +1029,7 @@ fn printInfo(allocator: std.mem.Allocator, info: InfoDisplay) !void {
         if (info.manifest.submodules.len > 0) {
             try w.interface.print("Submodules (.gitmodules):\n", .{});
             for (info.manifest.submodules) |p| {
-                try w.interface.print("  - {s}\n", .{p});
+                try w.interface.print("  - {s}  url={s}\n", .{ p.path, p.url orelse "(none)" });
             }
 
             var has_dep_submodule = false;
@@ -856,12 +1051,12 @@ fn printInfo(allocator: std.mem.Allocator, info: InfoDisplay) !void {
     } else {
         try w.interface.print("Present:         yes\n", .{});
         if (info.build_script.units.len == 0) {
-            try w.interface.print("Compiled units:  none found\n", .{});
+            try w.interface.print("Executables:     none found\n", .{});
         } else {
-            try w.interface.print("Compiled units:  {d}\n", .{info.build_script.units.len});
+            try w.interface.print("Executables:     {d}\n", .{info.build_script.units.len});
             for (info.build_script.units) |u| {
-                try w.interface.print("  - kind={s} var={s}\n", .{ u.kind, u.variable });
-                if (u.name_expr) |n| try w.interface.print("      name:            {s}\n", .{n});
+                try w.interface.print("  - var={s}\n", .{u.variable});
+                if (u.name) |n| try w.interface.print("      name:            {s}\n", .{n});
                 if (u.root_source_file) |r| try w.interface.print("      root_source:     {s}\n", .{r});
                 if (u.target_expr) |t| try w.interface.print("      target:          {s}\n", .{t});
                 if (u.optimize_expr) |o| try w.interface.print("      optimize:        {s}\n", .{o});
@@ -873,27 +1068,26 @@ fn printInfo(allocator: std.mem.Allocator, info: InfoDisplay) !void {
                     }
                 }
                 try w.interface.print("      install step:    {s}\n", .{if (u.installed) "yes (zig-out/bin for executables)" else "no"});
-                try w.interface.print("      run step:        {s}\n", .{if (u.has_run_step) "yes" else "no"});
             }
         }
     }
 
-    try printHeaderStyled(allocator, &w, "Refs");
+    try printHeaderStyled(allocator, &w, "Git References");
     if (info.branches.len > 0) {
         try w.interface.print("Branches ({d}):\n", .{info.branches.len});
         for (info.branches) |br| {
-            try w.interface.print("  - {s} ({s})\n", .{ br.name, br.commit[0..@min(12, br.commit.len)] });
+            try w.interface.print("  * {s} {s}\n", .{ br.name, br.commit[0..@min(12, br.commit.len)] });
         }
     } else {
-        try w.interface.print("Branches:        (none found)\n", .{});
+        try w.interface.print("Branches: (none found)\n", .{});
     }
     if (info.tags.len > 0) {
         try w.interface.print("Tags ({d}):\n", .{info.tags.len});
         for (info.tags) |tag| {
-            try w.interface.print("  - {s} ({s})\n", .{ tag.name, tag.commit[0..@min(12, tag.commit.len)] });
+            try w.interface.print("  * {s} {s}\n", .{ tag.name, tag.commit[0..@min(12, tag.commit.len)] });
         }
     } else {
-        try w.interface.print("Tags:            (none found)\n", .{});
+        try w.interface.print("Tags: (none found)\n", .{});
     }
 
     try w.interface.flush();
