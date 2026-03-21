@@ -72,7 +72,7 @@ jobs:
         run: zig build cli --summary all -- list | grep "docent"
 
       - name: Uninstall the app
-        run: zig build cli --summary all -- uninstall docent
+        run: zig build cli --summary all -- uninstall docent --yes
 
       - name: Check if the app was uninstalled correctly
         run: zig build cli --summary all -- list | grep -v "docent"
@@ -84,7 +84,7 @@ jobs:
         run: zigit --version
 
       - name: Uninstall the app
-        run: zig build cli --summary all -- uninstall zigit
+        run: zig build cli --summary all -- uninstall zigit --yes
 
       - name: Check if the app was uninstalled correctly
         run: zig build cli --summary all -- list | grep -v "zigit"

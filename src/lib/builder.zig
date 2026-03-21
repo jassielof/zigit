@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const fugaz = @import("fugaz");
 
 pub const OptimizeMode = enum {
     ReleaseFast,
@@ -50,18 +51,26 @@ pub fn buildAndInstall(
     const optimize_flag = try std.fmt.allocPrint(allocator, "-Doptimize={s}", .{optimize.asString()});
     defer allocator.free(optimize_flag);
 
-    // Invoke zig build
+    // Install into a temp prefix instead of zig-out. Building the same repo as the running
+    // zigit process would otherwise try to overwrite zig-out/bin/zigit.exe on Windows
+    // (and some Unix setups) while the file is still mapped/locked.
+    var prefix_tmp = try fugaz.tempDir(allocator);
+    defer prefix_tmp.deinit();
+    const prefix_path = prefix_tmp.path();
+
+    var env = try std.process.getEnvMap(allocator);
+    defer env.deinit();
+    try env.put("ZIG_GLOBAL_CACHE_DIR", build_cache_dir);
+
     const result = std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{ "zig", "build", optimize_flag },
+        .argv = &.{ "zig", "build", optimize_flag, "--prefix", prefix_path },
         .cwd = worktree_path,
         .max_output_bytes = 8 * 1024 * 1024,
-        .env_map = null,
+        .env_map = &env,
     }) catch return error.BuildFailed;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
-
-    _ = build_cache_dir;
 
     switch (result.term) {
         .Exited => |code| {
@@ -81,7 +90,7 @@ pub fn buildAndInstall(
     const binary_file = try std.fmt.allocPrint(allocator, "{s}{s}", .{ binary_name, exe_ext });
     defer allocator.free(binary_file);
 
-    const src_path = try std.fs.path.join(allocator, &.{ worktree_path, "zig-out", "bin", binary_file });
+    const src_path = try std.fs.path.join(allocator, &.{ prefix_path, "bin", binary_file });
     defer allocator.free(src_path);
 
     // Ensure destination directory exists
