@@ -196,11 +196,19 @@ fn updateOne(
     // Checkout worktree
     var tmp = try fugaz.tempDir(allocator);
     defer tmp.deinit();
-    const worktree_path = tmp.path();
+    const worktree_path = try allocator.dupe(u8, tmp.path());
+    defer allocator.free(worktree_path);
     tmp.close() catch {};
 
     try git.worktreeAdd(allocator, bare_path, worktree_path, new_commit);
     defer git.worktreeRemove(allocator, bare_path, worktree_path);
+
+    git.submoduleUpdateInit(allocator, worktree_path) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "git submodule update failed: {}", .{err});
+        defer allocator.free(msg);
+        try printErr(msg);
+        return;
+    };
 
     const build_cache = try paths.buildCacheDir(allocator);
     defer allocator.free(build_cache);

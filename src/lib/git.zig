@@ -304,6 +304,14 @@ pub fn worktreeAdd(allocator: Allocator, bare_path: []const u8, worktree_path: [
     allocator.free(out);
 }
 
+/// Populate nested git submodules in a worktree (no-op when there are none).
+///
+/// git -C <worktree_path> submodule update --init --recursive
+pub fn submoduleUpdateInit(allocator: Allocator, worktree_path: []const u8) !void {
+    const out = try run(allocator, worktree_path, &.{ "submodule", "update", "--init", "--recursive" });
+    allocator.free(out);
+}
+
 /// Remove a worktree from the bare repo.
 ///
 /// git -C <bare_path> worktree remove --force <worktree_path>

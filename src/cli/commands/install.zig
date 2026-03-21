@@ -182,7 +182,9 @@ fn run(ctx: *ParseContext) anyerror!void {
     // Create a temporary worktree
     var tmp = try fugaz.tempDir(allocator);
     defer tmp.deinit();
-    const worktree_path = tmp.path();
+    // Dup before tmp.close(): close() frees the path buffer underlying tmp.path().
+    const worktree_path = try allocator.dupe(u8, tmp.path());
+    defer allocator.free(worktree_path);
 
     // Remove the fugaz-created empty dir so git worktree add can create it
     tmp.close() catch {};
@@ -194,6 +196,13 @@ fn run(ctx: *ParseContext) anyerror!void {
         std.process.exit(1);
     };
     defer git.worktreeRemove(allocator, bare_path, worktree_path);
+
+    git.submoduleUpdateInit(allocator, worktree_path) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "git submodule update failed: {}", .{err});
+        defer allocator.free(msg);
+        try printErr(msg);
+        std.process.exit(1);
+    };
 
     if (!builder.hasBuildZig(worktree_path)) {
         try printErr("no build.zig found — only Zig projects are supported");

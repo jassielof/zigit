@@ -90,6 +90,7 @@ pub fn buildAndInstall(
     const dest_file = try std.fmt.allocPrint(allocator, "{s}{s}", .{ binary_name, exe_ext });
     defer allocator.free(dest_file);
     const dest_path = try std.fs.path.join(allocator, &.{ dest_dir, dest_file });
+    errdefer allocator.free(dest_path);
 
     // Atomic rename: old -> .old, copy new, remove .old
     const old_path = try std.fmt.allocPrint(allocator, "{s}.old", .{dest_path});
@@ -115,7 +116,7 @@ pub fn buildAndInstall(
     // Remove .old on success
     std.fs.cwd().deleteFile(old_path) catch {};
 
-    return allocator.dupe(u8, dest_path);
+    return dest_path;
 }
 
 /// Returns true if the directory contains a build.zig file.
