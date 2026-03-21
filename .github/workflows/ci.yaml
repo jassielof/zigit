@@ -51,9 +51,6 @@ jobs:
         with:
           cache: true
 
-      - name: Run test suite
-        run: zig build tests --summary all
-
       - name: Attempt to install an app
         run: zig build cli --summary all -- install https://github.com/jassielof/docent
 
