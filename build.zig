@@ -92,15 +92,6 @@ pub fn build(b: *std.Build) void {
 
     cli_step.dependOn(&run_cmd.step);
 
-    const docs = b.addInstallDirectory(.{
-        .source_dir = exe.getEmittedDocs(),
-        .install_dir = .prefix,
-        .install_subdir = "docs",
-    });
-
-    const docs_step = b.step("docs", "Generate documentation");
-    docs_step.dependOn(&docs.step);
-
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/suite.zig"),

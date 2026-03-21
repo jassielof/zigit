@@ -46,6 +46,7 @@ pub fn setup(parent: *Command) !void {
         .short = 'c',
         .description = "Pin to a specific commit SHA",
     });
+    // TODO: use enum flag
     try cmd.addFlag([]const u8, .{
         .name = "optimize",
         .short = 'O',
