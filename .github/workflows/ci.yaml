@@ -35,7 +35,7 @@ jobs:
 
   tests:
     needs: build
-    name: Tests
+    name: Testing
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -55,6 +55,28 @@ jobs:
         run: zig build tests --summary all
 
       - name: Attempt to install an app
-        run: |
-          zig build cli --summary all -- install https://github.com/jassielof/docent
-          docent --version
+        run: zig build cli --summary all -- install https://github.com/jassielof/docent
+
+      - name: Check if the app was installed correctly
+        run: docent --version
+
+      - name: Check if it's listed
+        run: zig build cli --summary all -- list | grep "docent"
+
+      - name: Uninstall the app
+        run: zig build cli --summary all -- uninstall docent
+
+      - name: Check if the app was uninstalled correctly
+        run: zig build cli --summary all -- list | grep -v "docent"
+
+      - name: Check ability to install from a local path (the project itself)
+        run: zig build cli --summary all -- install ./
+
+      - name: Check if the app was installed correctly
+        run: zigit --version
+
+      - name: Uninstall the app
+        run: zig build cli --summary all -- uninstall zigit
+
+      - name: Check if the app was uninstalled correctly
+        run: zig build cli --summary all -- list | grep -v "zigit"
