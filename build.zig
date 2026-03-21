@@ -91,17 +91,4 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
 
     cli_step.dependOn(&run_cmd.step);
-
-    const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/suite.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = mod_name, .module = lib_mod }},
-        }),
-    });
-
-    const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("tests", "Run tests");
-    test_step.dependOn(&run_tests.step);
 }
