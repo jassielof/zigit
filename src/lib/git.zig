@@ -299,40 +299,56 @@ pub fn revParse(allocator: Allocator, bare_path: []const u8, ref: []const u8) ![
     return run(allocator, null, &.{ "-C", bare_path, "rev-parse", ref });
 }
 
-/// Short branch name for `git fetch origin <name>` (e.g. `"main"`). Caller owns result.
-fn remoteTrackingShortName(ref_name: []const u8) ?[]const u8 {
-    // refname:short under refs/remotes → `origin/main`
-    const slash = std.mem.indexOfScalar(u8, ref_name, '/') orelse return null;
-    return ref_name[slash + 1 ..];
-}
-
-/// Infer default branch when origin/HEAD metadata is missing (common for some shallow clones).
-fn defaultBranchFromRemoteList(allocator: Allocator, bare_path: []const u8) ![]u8 {
-    const refs = try listRemoteRefs(allocator, bare_path, .branches);
-    defer {
-        for (refs) |*r| r.deinit(allocator);
-        allocator.free(refs);
-    }
-    for (refs) |r| {
-        if (std.mem.endsWith(u8, r.name, "/HEAD")) continue;
-        const short = remoteTrackingShortName(r.name) orelse continue;
-        return allocator.dupe(u8, short);
-    }
-    return error.ParseError;
-}
-
 /// Get the remote default branch (e.g. "main" or "master"). Caller owns result.
+///
+/// Resolution order:
+///  1. The repo's own HEAD symref → `refs/heads/<branch>` (always works for bare clones).
+///  2. `refs/remotes/origin/HEAD` → `refs/remotes/origin/<branch>` (set by `remote set-head`).
+///  3. First entry in `refs/remotes` (non-bare repos with remote-tracking refs).
+///  4. First entry in `refs/heads` (bare clone fallback).
 pub fn defaultBranch(allocator: Allocator, bare_path: []const u8) ![]u8 {
-    // refs/remotes/origin/HEAD → refs/remotes/origin/<branch>
-    const sym = run(allocator, null, &.{ "-C", bare_path, "symbolic-ref", "refs/remotes/origin/HEAD" }) catch {
-        return defaultBranchFromRemoteList(allocator, bare_path);
-    };
-    defer allocator.free(sym);
-    const prefix = "refs/remotes/origin/";
-    if (std.mem.startsWith(u8, sym, prefix)) {
-        return allocator.dupe(u8, sym[prefix.len..]);
+    // 1. Bare-clone HEAD: `ref: refs/heads/main`
+    if (run(allocator, null, &.{ "-C", bare_path, "symbolic-ref", "HEAD" })) |head| {
+        defer allocator.free(head);
+        const prefix = "refs/heads/";
+        if (std.mem.startsWith(u8, head, prefix) and head.len > prefix.len) {
+            return allocator.dupe(u8, head[prefix.len..]);
+        }
+    } else |_| {}
+
+    // 2. Remote HEAD set by `git remote set-head -a origin`
+    if (run(allocator, null, &.{ "-C", bare_path, "symbolic-ref", "refs/remotes/origin/HEAD" })) |sym| {
+        defer allocator.free(sym);
+        const prefix = "refs/remotes/origin/";
+        if (std.mem.startsWith(u8, sym, prefix) and sym.len > prefix.len) {
+            return allocator.dupe(u8, sym[prefix.len..]);
+        }
+    } else |_| {}
+
+    // 3. First remote-tracking branch (non-bare repos)
+    if (listRemoteRefs(allocator, bare_path, .branches)) |remote_refs| {
+        defer {
+            for (remote_refs) |*r| r.deinit(allocator);
+            allocator.free(remote_refs);
+        }
+        for (remote_refs) |r| {
+            if (std.mem.endsWith(u8, r.name, "/HEAD")) continue;
+            const slash = std.mem.indexOfScalar(u8, r.name, '/') orelse continue;
+            return allocator.dupe(u8, r.name[slash + 1 ..]);
+        }
+    } else |_| {}
+
+    // 4. First local branch (bare clone where refs/remotes is empty)
+    const local_refs = try listRemoteRefs(allocator, bare_path, .local_branches);
+    defer {
+        for (local_refs) |*r| r.deinit(allocator);
+        allocator.free(local_refs);
     }
-    return defaultBranchFromRemoteList(allocator, bare_path);
+    for (local_refs) |r| {
+        return allocator.dupe(u8, r.name);
+    }
+
+    return error.ParseError;
 }
 
 /// Return refs from `git for-each-ref` for branches or tags.
