@@ -93,6 +93,15 @@ jobs:
       - name: Check if the app was installed correctly
         run: zigit --version
 
+      # Self-update: the installed zigit binary replaces itself.
+      # --force rebuilds even when the commit hasn't changed (the normal CI case)
+      # so we actually exercise the running-binary-replacement path on every OS.
+      - name: Self-update zigit
+        run: zigit update zigit --force
+
+      - name: Verify zigit works after self-update
+        run: zigit --version
+
       - name: Check ability to forcefully reinstall
         run: zig build cli --summary all -- install ./ --rebuild
 

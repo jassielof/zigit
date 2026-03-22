@@ -3,8 +3,38 @@
 //! Only `zig build` is supported (build.zig required).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const fugaz = @import("fugaz");
+
+/// Rename `old_path` to `new_path`, replacing the destination if it exists.
+///
+/// On Windows, Zig's `Dir.rename` goes through `NtSetInformationFile` which
+/// fails with `AccessDenied` when the source is the currently-running
+/// executable (the Windows image loader holds an incompatible share mode at
+/// that layer).  `MoveFileExW` uses a higher-level Win32 code path that
+/// respects the `FILE_SHARE_DELETE` flag the loader sets and succeeds for
+/// running executables on NTFS.
+fn renameFile(allocator: Allocator, old_path: []const u8, new_path: []const u8) !void {
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        const old_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, old_path);
+        defer allocator.free(old_w);
+        const new_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, new_path);
+        defer allocator.free(new_w);
+        const MOVEFILE_REPLACE_EXISTING: windows.DWORD = 0x00000001;
+        if (windows.kernel32.MoveFileExW(old_w.ptr, new_w.ptr, MOVEFILE_REPLACE_EXISTING) == 0) {
+            return switch (windows.kernel32.GetLastError()) {
+                .ACCESS_DENIED => error.AccessDenied,
+                .FILE_NOT_FOUND => error.FileNotFound,
+                .SHARING_VIOLATION => error.FileBusy,
+                else => |err| windows.unexpectedError(err),
+            };
+        }
+        return;
+    }
+    return std.fs.cwd().rename(old_path, new_path);
+}
 
 pub const OptimizeMode = enum {
     ReleaseFast,
@@ -108,28 +138,43 @@ pub fn buildAndInstall(
     const dest_path = try std.fs.path.join(allocator, &.{ dest_dir, dest_file });
     errdefer allocator.free(dest_path);
 
-    // Atomic rename: old -> .old, copy new, remove .old
     const old_path = try std.fmt.allocPrint(allocator, "{s}.old", .{dest_path});
     defer allocator.free(old_path);
+    const stage_path = try std.fmt.allocPrint(allocator, "{s}.new", .{dest_path});
+    defer allocator.free(stage_path);
 
     const file_exists = blk: {
         std.fs.cwd().access(dest_path, .{}) catch break :blk false;
         break :blk true;
     };
 
+    // Clean up any leftovers from a previous self-update attempt before
+    // touching the destination. On Windows you cannot delete or write over a
+    // running executable, but you CAN rename it on NTFS.  The strategy is:
+    //
+    //   1. Copy new binary to <dest>.new   (no locking — new file)
+    //   2. Rename <dest>  → <dest>.old     (NTFS: rename of running exe is ok)
+    //   3. Rename <dest>.new → <dest>      (fast, <dest> is now free)
+    //   4. Delete <dest>.old               (may fail if still in use — ignored)
+    std.fs.cwd().deleteFile(old_path) catch {};
+    std.fs.cwd().deleteFile(stage_path) catch {};
+
+    // Step 1: stage the new binary
+    try std.fs.cwd().copyFile(src_path, std.fs.cwd(), stage_path, .{});
+    errdefer std.fs.cwd().deleteFile(stage_path) catch {};
+
+    // Step 2: move the current binary aside
     if (file_exists) {
-        std.fs.cwd().rename(dest_path, old_path) catch {};
+        try renameFile(allocator, dest_path, old_path);
     }
 
-    std.fs.cwd().copyFile(src_path, std.fs.cwd(), dest_path, .{}) catch |err| {
-        // Restore on failure
-        if (file_exists) {
-            std.fs.cwd().rename(old_path, dest_path) catch {};
-        }
+    // Step 3: promote the staged binary
+    renameFile(allocator, stage_path, dest_path) catch |err| {
+        if (file_exists) renameFile(allocator, old_path, dest_path) catch {};
         return err;
     };
 
-    // Remove .old on success
+    // Step 4: remove the old binary; silently ignored when still in use
     std.fs.cwd().deleteFile(old_path) catch {};
 
     return dest_path;
