@@ -10,6 +10,7 @@ const uninstall = @import("uninstall.zig");
 const update = @import("update.zig");
 const list = @import("list.zig");
 const info = @import("info.zig");
+const doctor = @import("doctor.zig");
 
 /// Register all subcommands on the root command.
 pub fn setup(root: *Command) !void {
@@ -18,4 +19,5 @@ pub fn setup(root: *Command) !void {
     try update.setup(root);
     try list.setup(root);
     try info.setup(root);
+    try doctor.setup(root);
 }

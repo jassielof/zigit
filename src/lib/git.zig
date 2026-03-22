@@ -264,6 +264,14 @@ pub fn cloneBare(allocator: Allocator, url: []const u8, dest: []const u8, ref: ?
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
+    // Print git output so user sees progress
+    if (result.stderr.len > 0) {
+        var buf: [8192]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        w.interface.print("{s}", .{result.stderr}) catch {};
+        w.interface.flush() catch {};
+    }
+
     switch (result.term) {
         .Exited => |code| if (code != 0) return GitError.CommandFailed,
         else => return GitError.CommandFailed,
@@ -346,6 +354,16 @@ pub fn listRemoteRefs(allocator: Allocator, bare_path: []const u8, kind: RefKind
 /// git -C <bare_path> worktree add <worktree_path> <commit>
 pub fn worktreeAdd(allocator: Allocator, bare_path: []const u8, worktree_path: []const u8, commit: []const u8) !void {
     const out = try run(allocator, null, &.{ "-C", bare_path, "worktree", "add", "--detach", worktree_path, commit });
+    allocator.free(out);
+}
+
+/// Attach HEAD in an existing worktree to a branch name at a specific commit.
+/// This avoids detached-HEAD metadata in downstream builds while still building
+/// the exact resolved commit.
+///
+/// git -C <worktree_path> checkout -B <branch> <commit>
+pub fn checkoutBranchAtCommit(allocator: Allocator, worktree_path: []const u8, branch: []const u8, commit: []const u8) !void {
+    const out = try run(allocator, null, &.{ "-C", worktree_path, "checkout", "-B", branch, commit });
     allocator.free(out);
 }
 

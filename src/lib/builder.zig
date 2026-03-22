@@ -78,6 +78,13 @@ pub fn buildAndInstall(
                 std.log.err("zig build failed:\n{s}", .{result.stderr});
                 return error.BuildFailed;
             }
+            // Print build output so user sees compilation progress
+            if (result.stderr.len > 0) {
+                var buf: [8192]u8 = undefined;
+                var w = std.fs.File.stderr().writer(&buf);
+                w.interface.print("{s}", .{result.stderr}) catch {};
+                w.interface.flush() catch {};
+            }
         },
         else => return error.BuildFailed,
     }

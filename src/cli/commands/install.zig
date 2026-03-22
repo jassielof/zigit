@@ -185,6 +185,10 @@ fn run(ctx: *ParseContext) anyerror!void {
         .remote => |parsed| {
             const alias = alias_flag orelse parsed.repo;
 
+            var effective_branch: ?[]const u8 = null;
+            var owns_effective_branch = false;
+            defer if (owns_effective_branch and effective_branch != null) allocator.free(effective_branch.?);
+
             if (try db.aliasExists(alias)) {
                 const msg = try std.fmt.allocPrint(allocator, "alias '{s}' already exists — use --alias to choose a different name", .{alias});
                 defer allocator.free(msg);
@@ -205,11 +209,6 @@ fn run(ctx: *ParseContext) anyerror!void {
             defer allocator.free(bare_path);
 
             if (!git.bareExists(bare_path)) {
-                var buf: [256]u8 = undefined;
-                var w = std.fs.File.stdout().writer(&buf);
-                try w.interface.print("Cloning {s}/{s}/{s}...\n", .{ parsed.host, parsed.owner, parsed.repo });
-                try w.interface.flush();
-
                 git.cloneBare(allocator, url, bare_path, clone_ref) catch |err| {
                     const msg = try std.fmt.allocPrint(allocator, "git clone failed: {}", .{err});
                     defer allocator.free(msg);
@@ -226,9 +225,11 @@ fn run(ctx: *ParseContext) anyerror!void {
                         std.process.exit(1);
                     };
                     break :blk sha;
-                } else if (commit_flag) |c| {
-                    break :blk try allocator.dupe(u8, c);
                 } else if (branch_flag) |b| {
+                    effective_branch = b;
+                    if (commit_flag) |c| {
+                        break :blk try allocator.dupe(u8, c);
+                    }
                     git.fetch(allocator, bare_path, b) catch {};
                     const sha = git.revParse(allocator, bare_path, "FETCH_HEAD") catch {
                         const sha2 = git.revParse(allocator, bare_path, b) catch {
@@ -238,10 +239,15 @@ fn run(ctx: *ParseContext) anyerror!void {
                         break :blk sha2;
                     };
                     break :blk sha;
+                } else if (commit_flag) |c| {
+                    break :blk try allocator.dupe(u8, c);
                 } else {
                     const branch = git.defaultBranch(allocator, bare_path) catch
                         try allocator.dupe(u8, "HEAD");
-                    defer allocator.free(branch);
+                    owns_effective_branch = true;
+                    if (!std.mem.eql(u8, branch, "HEAD")) {
+                        effective_branch = branch;
+                    }
                     git.fetch(allocator, bare_path, branch) catch {};
                     const sha = git.revParse(allocator, bare_path, "FETCH_HEAD") catch
                         try git.revParse(allocator, bare_path, "HEAD");
@@ -253,7 +259,7 @@ fn run(ctx: *ParseContext) anyerror!void {
             {
                 var buf: [256]u8 = undefined;
                 var w = std.fs.File.stdout().writer(&buf);
-                try w.interface.print("Building {s} @ {s}...\n", .{ alias, commit[0..@min(8, commit.len)] });
+                try w.interface.print("Building {s}...\n", .{alias});
                 try w.interface.flush();
             }
 
@@ -271,6 +277,15 @@ fn run(ctx: *ParseContext) anyerror!void {
                 std.process.exit(1);
             };
             defer git.worktreeRemove(allocator, bare_path, worktree_path);
+
+            if (effective_branch) |b| {
+                git.checkoutBranchAtCommit(allocator, worktree_path, b, commit) catch |err| {
+                    const msg = try std.fmt.allocPrint(allocator, "git checkout failed: {}", .{err});
+                    defer allocator.free(msg);
+                    try printErr(msg);
+                    std.process.exit(1);
+                };
+            }
 
             git.submoduleUpdateInit(allocator, worktree_path) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "git submodule update failed: {}", .{err});
@@ -312,7 +327,7 @@ fn run(ctx: *ParseContext) anyerror!void {
                 .host = parsed.host,
                 .owner = parsed.owner,
                 .repo = parsed.repo,
-                .branch = if (tag_flag != null) null else branch_flag,
+                .branch = effective_branch,
                 .tag = tag_flag,
                 .commit = commit,
                 .optimize = optimize_str,
