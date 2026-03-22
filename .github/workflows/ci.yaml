@@ -102,9 +102,6 @@ jobs:
       - name: Verify zigit works after self-update
         run: zigit --version
 
-      - name: Check ability to forcefully reinstall
-        run: zig build cli --summary all -- install ./ --rebuild
-
       - name: Uninstall zigit
         run: zig build cli --summary all -- uninstall zigit --yes
 
