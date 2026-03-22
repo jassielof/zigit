@@ -64,11 +64,11 @@ jobs:
       - name: Check if the app was installed correctly
         run: docent --version
 
-      # Match table rows only (^alias + whitespace). Empty-state text mentions "zigit", so
-      # `grep -v zigit` would drop every line and grep exits 1 under bash -e.
+      # Use JSON output for stable parsing across terminals/OSes; table output includes
+      # box-drawing characters, so anchoring at start-of-line is fragile.
       - name: Check docent is listed
         shell: bash
-        run: zig build cli --summary all -- list | grep -qE '^docent[[:space:]]'
+        run: zig build cli --summary all -- list --json | grep -q '"alias":"docent"'
 
       - name: Uninstall docent
         run: zig build cli --summary all -- uninstall docent --yes
@@ -76,7 +76,7 @@ jobs:
       - name: Check docent is not listed
         shell: bash
         run: |
-          if zig build cli --summary all -- list | grep -qE '^docent[[:space:]]'; then
+          if zig build cli --summary all -- list --json | grep -q '"alias":"docent"'; then
             echo "docent is still listed as installed" >&2
             exit 1
           fi
@@ -93,7 +93,7 @@ jobs:
       - name: Check zigit is not listed
         shell: bash
         run: |
-          if zig build cli --summary all -- list | grep -qE '^zigit[[:space:]]'; then
+          if zig build cli --summary all -- list --json | grep -q '"alias":"zigit"'; then
             echo "zigit is still listed as installed" >&2
             exit 1
           fi
