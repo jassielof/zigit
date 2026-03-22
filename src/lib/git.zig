@@ -276,6 +276,14 @@ pub fn cloneBare(allocator: Allocator, url: []const u8, dest: []const u8, ref: ?
         .Exited => |code| if (code != 0) return GitError.CommandFailed,
         else => return GitError.CommandFailed,
     }
+
+    // Auto-detect remote HEAD so defaultBranch() can find it later.
+    // In a bare shallow clone with --single-branch, this metadata might be missing.
+    const set_head = run(allocator, null, &.{ "-C", dest, "remote", "set-head", "-a", "origin" }) catch {
+        // Ignore failures; not all remotes support this
+        return;
+    };
+    allocator.free(set_head);
 }
 
 /// Fetch a ref into an existing bare repo.
