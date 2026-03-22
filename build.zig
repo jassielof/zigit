@@ -1,5 +1,6 @@
 const std = @import("std");
 const fangz_build = @import("fangz");
+const release_build = @import("release.build.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -91,4 +92,5 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
 
     cli_step.dependOn(&run_cmd.step);
+    release_build.addReleaseStep(b, mod_name, fangz_build);
 }
