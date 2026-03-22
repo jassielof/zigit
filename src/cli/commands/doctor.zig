@@ -25,31 +25,36 @@ fn run(ctx: *ParseContext) anyerror!void {
     const bin_dir = try paths.binDir(allocator);
     defer allocator.free(bin_dir);
 
-    var buf: [2048]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
 
-    try w.interface.print("=== zigit Doctor ===\n\n", .{});
+    try w.interface.print("\n", .{});
+    try w.interface.print("  Zigit doctor\n", .{});
+    try w.interface.print("  -----------------------------------------\n\n", .{});
 
-    // Show install directory
-    try w.interface.print("Install directory: {s}\n", .{bin_dir});
+    // Install directory
+    try w.interface.print("  Install directory\n", .{});
+    try w.interface.print("    {s}\n", .{bin_dir});
 
-    // Check if directory exists
     var dir = std.fs.cwd().openDir(bin_dir, .{}) catch null;
-    if (dir) |*d| {
-        defer d.close();
-        try w.interface.print("  ✓ Directory exists\n", .{});
+    const dir_ok = dir != null;
+    if (dir) |*d| d.close();
+
+    if (dir_ok) {
+        try w.interface.print("    ok    path exists\n", .{});
     } else {
-        try w.interface.print("  ✗ Directory does not exist\n", .{});
+        try w.interface.print("    warn  path does not exist (run a command that creates it, or create it manually)\n", .{});
     }
 
-    // Check PATH
-    try w.interface.print("\nChecking PATH...\n", .{});
+    // PATH
+    try w.interface.print("\n  PATH\n", .{});
     var path_env = try std.process.getEnvMap(allocator);
     defer path_env.deinit();
 
     const path_var = path_env.get("PATH");
     if (path_var == null) {
-        try w.interface.print("  ✗ PATH environment variable not set\n", .{});
+        try w.interface.print("    err   PATH is not set\n", .{});
+        try w.interface.print("\n", .{});
         try w.interface.flush();
         return;
     }
@@ -62,7 +67,6 @@ fn run(ctx: *ParseContext) anyerror!void {
     while (path_iter.next()) |entry| {
         const trimmed = std.mem.trim(u8, entry, " \t");
         if (trimmed.len == 0) continue;
-
         if (std.mem.eql(u8, trimmed, bin_dir)) {
             found_in_path = true;
             break;
@@ -70,28 +74,27 @@ fn run(ctx: *ParseContext) anyerror!void {
     }
 
     if (found_in_path) {
-        try w.interface.print("  ✓ Install directory is in PATH\n", .{});
+        try w.interface.print("    ok    this directory is on PATH\n", .{});
     } else {
-        try w.interface.print("  ✗ Install directory is NOT in PATH\n", .{});
-        try w.interface.print("\n  To fix this, add {s} to your PATH:\n", .{bin_dir});
+        try w.interface.print("    warn  this directory is not on PATH\n", .{});
+        try w.interface.print("\n    Add it so installed tools are found. For example:\n", .{});
         if (@import("builtin").os.tag == .windows) {
-            try w.interface.print("    setx PATH \"%PATH%;{s}\"\n", .{bin_dir});
+            try w.interface.print("      setx PATH \"%PATH%;{s}\"\n", .{bin_dir});
         } else {
-            try w.interface.print("    export PATH=\"$PATH:{s}\"\n", .{bin_dir});
-            try w.interface.print("    # Add this line to your shell profile (~/.bashrc, ~/.zshrc, etc.)\n", .{});
+            try w.interface.print("      export PATH=\"$PATH:{s}\"\n", .{bin_dir});
+            try w.interface.print("      (put that in ~/.bashrc, ~/.zshrc, or your shell config)\n", .{});
         }
     }
 
-    // Try to execute zigit as a sanity check
-    try w.interface.print("\nVerifying binary accessibility...\n", .{});
+    // zigit on PATH
+    try w.interface.print("\n  Shell\n", .{});
     const is_available = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &.{ "zigit", "--version" },
         .max_output_bytes = 256,
     }) catch {
-        try w.interface.print("  ✗ 'zigit' command is not accessible from current shell\n", .{});
-        try w.interface.print("    (You may need to restart your terminal or run 'source' on your shell profile)\n", .{});
-        try w.interface.print("\n=== End of Report ===\n", .{});
+        try w.interface.print("    warn  `zigit` is not reachable from this shell (PATH or new terminal needed)\n", .{});
+        try w.interface.print("\n", .{});
         try w.interface.flush();
         return;
     };
@@ -102,12 +105,16 @@ fn run(ctx: *ParseContext) anyerror!void {
     }
 
     if (is_available.term == .Exited and is_available.term.Exited == 0) {
-        try w.interface.print("  ✓ 'zigit' command is accessible from current shell\n", .{});
+        const ver = std.mem.trim(u8, is_available.stdout, " \t\r\n");
+        if (ver.len > 0) {
+            try w.interface.print("    ok    zigit responds: {s}\n", .{ver});
+        } else {
+            try w.interface.print("    ok    zigit is on PATH\n", .{});
+        }
     } else {
-        try w.interface.print("  ✗ 'zigit' command is not accessible from current shell\n", .{});
-        try w.interface.print("    (You may need to restart your terminal or run 'source' on your shell profile)\n", .{});
+        try w.interface.print("    warn  `zigit --version` did not succeed from this shell\n", .{});
     }
 
-    try w.interface.print("\n=== End of Report ===\n", .{});
+    try w.interface.print("\n", .{});
     try w.interface.flush();
 }

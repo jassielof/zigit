@@ -245,9 +245,7 @@ fn run(ctx: *ParseContext) anyerror!void {
                     const branch = git.defaultBranch(allocator, bare_path) catch
                         try allocator.dupe(u8, "HEAD");
                     owns_effective_branch = true;
-                    if (!std.mem.eql(u8, branch, "HEAD")) {
-                        effective_branch = branch;
-                    }
+                    effective_branch = branch;
                     git.fetch(allocator, bare_path, branch) catch {};
                     const sha = git.revParse(allocator, bare_path, "FETCH_HEAD") catch
                         try git.revParse(allocator, bare_path, "HEAD");
@@ -279,12 +277,14 @@ fn run(ctx: *ParseContext) anyerror!void {
             defer git.worktreeRemove(allocator, bare_path, worktree_path);
 
             if (effective_branch) |b| {
-                git.checkoutBranchAtCommit(allocator, worktree_path, b, commit) catch |err| {
-                    const msg = try std.fmt.allocPrint(allocator, "git checkout failed: {}", .{err});
-                    defer allocator.free(msg);
-                    try printErr(msg);
-                    std.process.exit(1);
-                };
+                if (!std.mem.eql(u8, b, "HEAD")) {
+                    git.checkoutBranchAtCommit(allocator, worktree_path, b, commit) catch |err| {
+                        const msg = try std.fmt.allocPrint(allocator, "git checkout failed: {}", .{err});
+                        defer allocator.free(msg);
+                        try printErr(msg);
+                        std.process.exit(1);
+                    };
+                }
             }
 
             git.submoduleUpdateInit(allocator, worktree_path) catch |err| {
