@@ -85,6 +85,11 @@ pub fn addReleaseStep(
             break :blk cmd;
         };
 
-        release_step.dependOn(&compress.step);
+        // ── Cleanup: remove the per-target dir after archiving ────────────────
+        const target_dir = b.pathJoin(&.{ b.install_prefix, "release", platform.name });
+        const remove_dir = b.addRemoveDirTree(.{ .cwd_relative = target_dir }); // ← no b.path()
+        remove_dir.step.dependOn(&compress.step);
+
+        release_step.dependOn(&remove_dir.step);
     }
 }
