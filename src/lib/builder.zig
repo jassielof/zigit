@@ -92,28 +92,21 @@ pub fn buildAndInstall(
     defer env.deinit();
     try env.put("ZIG_GLOBAL_CACHE_DIR", build_cache_dir);
 
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "zig", "build", optimize_flag, "--prefix", prefix_path },
-        .cwd = worktree_path,
-        .max_output_bytes = 8 * 1024 * 1024,
-        .env_map = &env,
-    }) catch return error.BuildFailed;
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    var child = std.process.Child.init(&.{ "zig", "build", optimize_flag, "--prefix", prefix_path }, allocator);
+    child.cwd = worktree_path;
+    child.env_map = &env;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
 
-    switch (result.term) {
+    child.spawn() catch return error.BuildFailed;
+    const term = child.wait() catch return error.BuildFailed;
+
+    switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                std.log.err("zig build failed:\n{s}", .{result.stderr});
+                std.log.err("zig build failed with exit code {d}", .{code});
                 return error.BuildFailed;
-            }
-            // Print build output so user sees compilation progress
-            if (result.stderr.len > 0) {
-                var buf: [8192]u8 = undefined;
-                var w = std.fs.File.stderr().writer(&buf);
-                w.interface.print("{s}", .{result.stderr}) catch {};
-                w.interface.flush() catch {};
             }
         },
         else => return error.BuildFailed,

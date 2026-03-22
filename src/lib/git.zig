@@ -167,6 +167,29 @@ pub fn canonicalRemoteUrl(allocator: Allocator, raw: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "https://{s}/{s}/{s}.git", .{ parsed.host, parsed.owner, parsed.repo });
 }
 
+/// Run `git` with stdin ignored and stdout/stderr inherited so fetch, clone,
+/// submodule, and similar commands show live progress.
+pub fn runInherit(allocator: Allocator, cwd: ?[]const u8, args: []const []const u8) !void {
+    var argv = try std.ArrayList([]const u8).initCapacity(allocator, args.len + 1);
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    for (args) |arg| try argv.append(allocator, arg);
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.cwd = cwd;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    child.spawn() catch return GitError.CommandFailed;
+    const term = child.wait() catch return GitError.CommandFailed;
+
+    switch (term) {
+        .Exited => |code| if (code != 0) return GitError.CommandFailed,
+        else => return GitError.CommandFailed,
+    }
+}
+
 /// Run a git command and return trimmed stdout. Caller owns the returned slice.
 pub fn run(allocator: Allocator, cwd: ?[]const u8, args: []const []const u8) ![]u8 {
     var argv = try std.ArrayList([]const u8).initCapacity(allocator, args.len + 1);
@@ -251,31 +274,7 @@ pub fn cloneBare(allocator: Allocator, url: []const u8, dest: []const u8, ref: ?
     try args.append(allocator, url);
     try args.append(allocator, dest);
 
-    var argv = try std.ArrayList([]const u8).initCapacity(allocator, args.items.len + 1);
-    defer argv.deinit(allocator);
-    try argv.append(allocator, "git");
-    for (args.items) |a| try argv.append(allocator, a);
-
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = argv.items,
-        .max_output_bytes = 1024 * 1024,
-    }) catch return GitError.CommandFailed;
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    // Print git output so user sees progress
-    if (result.stderr.len > 0) {
-        var buf: [8192]u8 = undefined;
-        var w = std.fs.File.stderr().writer(&buf);
-        w.interface.print("{s}", .{result.stderr}) catch {};
-        w.interface.flush() catch {};
-    }
-
-    switch (result.term) {
-        .Exited => |code| if (code != 0) return GitError.CommandFailed,
-        else => return GitError.CommandFailed,
-    }
+    runInherit(allocator, null, args.items) catch return GitError.CommandFailed;
 
     // Auto-detect remote HEAD so defaultBranch() can find it later.
     // In a bare shallow clone with --single-branch, this metadata might be missing.
@@ -290,8 +289,7 @@ pub fn cloneBare(allocator: Allocator, url: []const u8, dest: []const u8, ref: ?
 ///
 /// git -C <bare_path> fetch --depth 1 origin <ref>
 pub fn fetch(allocator: Allocator, bare_path: []const u8, ref: []const u8) !void {
-    const out = try run(allocator, null, &.{ "-C", bare_path, "fetch", "--depth", "1", "origin", ref });
-    allocator.free(out);
+    try runInherit(allocator, null, &.{ "-C", bare_path, "fetch", "--depth", "1", "origin", ref });
 }
 
 /// Resolve a ref to a full SHA. Caller owns the returned string.
@@ -397,8 +395,7 @@ pub fn listRemoteRefs(allocator: Allocator, bare_path: []const u8, kind: RefKind
 ///
 /// git -C <bare_path> worktree add <worktree_path> <commit>
 pub fn worktreeAdd(allocator: Allocator, bare_path: []const u8, worktree_path: []const u8, commit: []const u8) !void {
-    const out = try run(allocator, null, &.{ "-C", bare_path, "worktree", "add", "--detach", worktree_path, commit });
-    allocator.free(out);
+    try runInherit(allocator, null, &.{ "-C", bare_path, "worktree", "add", "--detach", worktree_path, commit });
 }
 
 /// Attach HEAD in an existing worktree to a branch name at a specific commit.
@@ -415,8 +412,7 @@ pub fn checkoutBranchAtCommit(allocator: Allocator, worktree_path: []const u8, b
 ///
 /// git -C <worktree_path> submodule update --init --recursive
 pub fn submoduleUpdateInit(allocator: Allocator, worktree_path: []const u8) !void {
-    const out = try run(allocator, worktree_path, &.{ "submodule", "update", "--init", "--recursive" });
-    allocator.free(out);
+    try runInherit(allocator, worktree_path, &.{ "submodule", "update", "--init", "--recursive" });
 }
 
 /// Remove a worktree from the bare repo.

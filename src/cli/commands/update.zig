@@ -272,9 +272,7 @@ fn updateFromLocalPath(
 
     const work_path = pkg.url;
 
-    if (git.run(allocator, work_path, &.{ "pull", "--ff-only" })) |out| {
-        allocator.free(out);
-    } else |_| {}
+    git.runInherit(allocator, work_path, &.{ "pull", "--ff-only" }) catch {};
 
     const new_commit = try git.revParseHeadOrLocal(allocator, work_path);
     defer allocator.free(new_commit);
