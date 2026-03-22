@@ -31,6 +31,12 @@ jobs:
       - name: Build
         run: zig build --summary all
 
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-artifacts
+          path: zig-out/release
+
   tests:
     needs: build
     name: Testing
@@ -86,6 +92,9 @@ jobs:
 
       - name: Check if the app was installed correctly
         run: zigit --version
+
+      - name: Check ability to forcefully reinstall
+        run: zig build cli --summary all -- install ./ --rebuild
 
       - name: Uninstall zigit
         run: zig build cli --summary all -- uninstall zigit --yes
