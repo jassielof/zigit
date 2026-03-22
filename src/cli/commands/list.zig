@@ -5,6 +5,7 @@
 const std = @import("std");
 const fangz = @import("fangz");
 const zigit = @import("zigit");
+const carnaval = @import("carnaval");
 
 const Command = fangz.Command;
 const ParseContext = fangz.ParseContext;
@@ -100,47 +101,39 @@ fn printTable(
     show_outdated_col: bool,
 ) !void {
     const stdout = std.fs.File.stdout();
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var w = stdout.writer(&buf);
 
-    if (show_outdated_col) {
-        try w.interface.print("{s:<20}  {s:<18}  {s:<10}  {s:<12}  {s}\n", .{
-            "ALIAS", "BRANCH/TAG", "COMMIT", "INSTALLED", "STATUS",
-        });
-        try w.interface.print("{s}\n", .{"─" ** 80});
-    } else {
-        try w.interface.print("{s:<20}  {s:<18}  {s:<10}  {s}\n", .{
-            "ALIAS", "BRANCH/TAG", "COMMIT", "INSTALLED",
-        });
-        try w.interface.print("{s}\n", .{"─" ** 66});
+    const cols: usize = if (show_outdated_col) 5 else 4;
+    const headers5 = [_][]const u8{ "ALIAS", "BRANCH/TAG", "COMMIT", "INSTALLED", "STATUS" };
+    const headers4 = [_][]const u8{ "ALIAS", "BRANCH/TAG", "COMMIT", "INSTALLED" };
+    const headers: []const []const u8 = if (show_outdated_col) &headers5 else &headers4;
+
+    const rows = try allocator.alloc([]const []const u8, packages.len);
+    defer {
+        for (rows) |r| allocator.free(r);
+        allocator.free(rows);
     }
 
-    // Flush header before rows (buffer may be too small for many rows)
-    try w.interface.flush();
-
     for (packages, 0..) |pkg, i| {
+        const row = try allocator.alloc([]const u8, cols);
         const ref = if (pkg.tag) |t| t else if (pkg.branch) |b| b else "-";
         const short_commit = pkg.commit[0..@min(8, pkg.commit.len)];
         const installed_date = if (pkg.installed_at.len >= 10) pkg.installed_at[0..10] else pkg.installed_at;
 
-        // Print each row into a fresh local buffer
-        var row_buf: [512]u8 = undefined;
-        var rw = stdout.writer(&row_buf);
-
+        row[0] = pkg.alias;
+        row[1] = ref;
+        row[2] = short_commit;
+        row[3] = installed_date;
         if (show_outdated_col) {
-            const status: []const u8 = if (pkg.pinned) "pinned" else if (is_outdated[i]) "outdated" else "ok";
-            try rw.interface.print("{s:<20}  {s:<18}  {s:<10}  {s:<12}  {s}\n", .{
-                pkg.alias, ref, short_commit, installed_date, status,
-            });
-        } else {
-            try rw.interface.print("{s:<20}  {s:<18}  {s:<10}  {s}\n", .{
-                pkg.alias, ref, short_commit, installed_date,
-            });
+            row[4] = if (pkg.pinned) "pinned" else if (is_outdated[i]) "outdated" else "ok";
         }
-        try rw.interface.flush();
+        rows[i] = row;
     }
 
-    _ = allocator;
+    const profile = carnaval.colorProfileForHandle(stdout.handle);
+    try carnaval.renderTableStyled(allocator, headers, rows, &w.interface, profile, .unicode);
+    try w.interface.flush();
 }
 
 fn printJson(allocator: std.mem.Allocator, packages: []const database.Package, is_outdated: []const bool) !void {
