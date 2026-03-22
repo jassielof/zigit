@@ -92,5 +92,5 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
 
     cli_step.dependOn(&run_cmd.step);
-    release_build.addReleaseStep(b, mod_name, fangz_build);
+    release_build.addReleaseStep(b, mod_name, fangz_build); // this causes a 'configure' print on start
 }
